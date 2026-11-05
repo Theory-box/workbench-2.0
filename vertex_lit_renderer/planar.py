@@ -65,6 +65,7 @@ def configure_faces(obj, face_indices, camera):
     indices = sorted(set(int(i) for i in face_indices))
     point, normal = plane_from_faces(obj.data, obj.matrix_world, indices)
     state = obj.vlr_planar
+    state.revision += 1
     state.faces = ','.join(map(str, indices))
     state.topology = topology_signature(obj.data)
     state.camera = camera
@@ -95,6 +96,7 @@ def configured_faces(obj):
 def clear_reflection(obj):
     """Detach only this object's bake; never delete possibly shared image data."""
     state = obj.vlr_planar
+    state.revision += 1
     old = state.image
     state.image = None
     if old is not None and old.get('vlr_planar_owned',False) and old.users == 0:
@@ -111,6 +113,7 @@ from bpy.props import StringProperty, PointerProperty, FloatVectorProperty, IntP
 
 
 class VLRPlanarSettings(bpy.types.PropertyGroup):
+    revision: IntProperty(default=0)
     faces: StringProperty()
     topology: StringProperty()
     camera: PointerProperty(type=bpy.types.Object)
@@ -307,11 +310,11 @@ def process_pending(engine, context, depsgraph):
     except Exception as exc:
         error=str(exc)
     # A clear/reconfigure between capture and publication must cancel publication.
-    token=(obj.vlr_planar.faces,obj.vlr_planar.topology,obj.vlr_planar.camera)
+    token=obj.vlr_planar.revision
     def finish():
         try:
             state=obj.vlr_planar
-            if token!=(state.faces,state.topology,state.camera) or not state.faces:return
+            if token!=state.revision or not state.faces:return
             if error is not None:raise RuntimeError(error)
             publish_capture(obj,pixels,projection)
         except ReferenceError:return

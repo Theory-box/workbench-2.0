@@ -47,7 +47,7 @@ def draw(engine,depsgraph,view_projection):
     if getattr(engine,'_strict_capture',False):return
     cache=getattr(engine,'_planar_overlay_cache',None)
     if cache is None:cache=engine._planar_overlay_cache={}
-    live=set()
+    live=set();geometry_live=set()
     old_depth=gpu.state.depth_test_get();old_mask=gpu.state.depth_mask_get();old_blend=gpu.state.blend_get()
     try:
         gpu.state.depth_test_set('LESS_EQUAL');gpu.state.depth_mask_set(False)
@@ -58,19 +58,27 @@ def draw(engine,depsgraph,view_projection):
             if obj.name not in getattr(engine,'_normal_records',{}):continue
             data=engine._mesh_cache.get(obj.name)
             if not data or 'vbo2' not in data:continue
-            try:faces=set(planar.configured_faces(obj))
-            except ValueError:continue
-            evaluated=obj.evaluated_get(depsgraph);mesh=evaluated.data
-            # Face indices must still refer to the configured source topology.
-            if planar.topology_signature(mesh)!=state.topology:continue
-            mesh.calc_loop_triangles()
-            groups={}
-            for tri in mesh.loop_triangles:
-                if tri.polygon_index in faces:groups.setdefault(tri.material_index,[]).append(tuple(tri.loops))
+            evaluated=obj.evaluated_get(depsgraph)
+            geometry_cache=getattr(engine,'_planar_face_cache',None)
+            if geometry_cache is None:geometry_cache=engine._planar_face_cache={}
+            geometry_key=(obj.as_pointer(),id(data['vbo']),state.faces,state.topology)
+            geometry=geometry_cache.get(geometry_key)
+            if geometry is None:
+                try:faces=set(planar.configured_faces(obj))
+                except ValueError:continue
+                mesh=evaluated.data
+                if planar.topology_signature(mesh)!=state.topology:continue
+                mesh.calc_loop_triangles()
+                groups={}
+                for tri in mesh.loop_triangles:
+                    if tri.polygon_index in faces:groups.setdefault(tri.material_index,[]).append(tuple(tri.loops))
+                geometry=geometry_cache[geometry_key]=(groups,data['vbo'])
+            groups=geometry[0]
+            geometry_live.add(geometry_key)
             for slot,indices in groups.items():
                 mat=evaluated.material_slots[slot].material if slot<len(evaluated.material_slots) else None
                 if mat is None:continue
-                key=(obj.as_pointer(),slot,id(data['vbo']),state.faces,node_transpiler.topo_signature(mat))
+                key=(obj.as_pointer(),slot,id(data['vbo']),state.faces,mat.as_pointer(),node_transpiler.topo_signature(mat))
                 live.add(key)
                 item=cache.get(key)
                 if item is None:
@@ -96,6 +104,8 @@ def draw(engine,depsgraph,view_projection):
                 batch.draw(sh)
         for key in list(cache):
             if key not in live:del cache[key]
+        for key in list(getattr(engine,'_planar_face_cache',{})):
+            if key not in geometry_live:del engine._planar_face_cache[key]
     finally:
         gpu.state.depth_test_set(old_depth);gpu.state.depth_mask_set(old_mask);gpu.state.blend_set(old_blend)
         gpu.state.face_culling_set(getattr(engine,'_cull','NONE'))

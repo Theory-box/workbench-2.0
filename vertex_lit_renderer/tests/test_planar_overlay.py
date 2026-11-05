@@ -64,6 +64,12 @@ def draw(self,context,dg):
       buf=fb.read_color(0,0,256,256,4,0,'FLOAT');buf.dimensions=256*256*4
       overlay=np.array(buf).reshape(256,256,4)
       assert overlay[:,:,0].max()>.1,'Overlay has no reflected red object'
+      original_signature=planar.topology_signature
+      def unexpected_hash(*args):raise AssertionError('Unchanged reflection mesh was hashed again')
+      planar.topology_signature=unexpected_hash
+      try:planar_overlay.draw(self,dg,projection@view)
+      finally:planar.topology_signature=original_signature
+
       np.save(root.parent/'work'/'planar-overlay.npy',overlay)
       rough_image=bpy.data.images.new('RoughMap',width=4,height=4,float_buffer=True)
       rough_image.colorspace_settings.name='Non-Color'

@@ -1220,7 +1220,7 @@ class VertexLitEngine(bpy.types.RenderEngine):
 
             # Blender offsets this result into the border (or crops the final image).
             # Keep full-frame projection/effects, but submit only the selected pixels.
-            rl.rect = arr[y0:y0+rh, x0:x0+rw].reshape(-1, 4).tolist() if arr is not None else \
+            rl.rect = np.ascontiguousarray(arr[y0:y0+rh, x0:x0+rw]).reshape(-1, 4) if arr is not None else \
                 [[0.0, 0.0, 0.0, 1.0]] * (rw * rh)
             self.end_result(result)
             result = None
@@ -1248,6 +1248,7 @@ class VertexLitEngine(bpy.types.RenderEngine):
         # context persists across enter/leave, so those stay valid — clearing them
         # only forces an expensive full recompile on every re-entry.
         self._planar_overlay_cache = {}
+        self._planar_face_cache = {}
         self._dummy_depth = None
         self._white_tex = None
         self._shadow_tex_cache = None

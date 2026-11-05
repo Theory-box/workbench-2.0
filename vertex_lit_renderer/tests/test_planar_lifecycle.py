@@ -14,7 +14,9 @@ image=bpy.data.images.new('Bake',8,8);a.vlr_planar.image=image
 try:planar.configure_faces(a,[0,1],camera);raise AssertionError()
 except ValueError:pass
 assert a.vlr_planar.image is image and planar.configured_faces(a)==[0]
+revision=a.vlr_planar.revision
 planar.clear_reflection(a)
+assert a.vlr_planar.revision!=revision
 assert a.vlr_planar.image is None and not a.vlr_planar.faces
 assert bpy.data.images.get('Bake') is image
 planar.configure_faces(a,[0],camera)
@@ -22,7 +24,7 @@ planar.configure_faces(a,[0],camera)
 path=pathlib.Path(__file__).resolve().parents[3]/'work'/'planar-lifecycle.blend'
 bpy.ops.wm.save_as_mainfile(filepath=str(path))
 bpy.ops.wm.open_mainfile(filepath=str(path))
-a=bpy.data.objects.get(a.name) if False else bpy.data.objects['Cube.001']
+a=bpy.data.objects['Cube.001']
 assert planar.configured_faces(a)==[0] and a.vlr_planar.camera is not None
 planar.unregister()
 print('PASS planar object isolation, failed reconfigure, clear, save/reopen')
