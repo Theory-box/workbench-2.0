@@ -1,0 +1,31 @@
+Planar reflection bake investigation
+
+Status: geometry math only; no UI or reflection capture installed.
+
+First scope: selected coplanar faces, active scene camera, sharp single-bounce
+reflection, explicit Bake/Rebake. Store camera and plane transforms with image.
+
+Reuse existing evaluated scene, mesh GPU buffers, materials, and textures.
+Queue capture in an active renderer draw callback, where the owning GPU context
+and prepared geometry exist. Do not instantiate another scene or RenderEngine.
+Wait for geometry/material queues to finish before capturing.
+
+Additional resources: temporary reflected-view color/depth target, potentially
+a shadow target if the current shadow coverage does not cover the reflected view,
+and the persistent baked image. Avoid permanently retaining both CPU/GPU copies
+of intermediate capture data. Use bulk pixel transfer, not Python pixel lists.
+
+Required integration checks:
+- Reflection changes handedness: invert culling relative to object mirroring.
+- Clip at mirror plane; exclude selected reflector from its own capture.
+- Keep capture view/culling/shadow state separate and restore state on errors.
+- Reuse light positions; freeze camera-following studio light to original view.
+- Project saved image using saved reflection matrix; bypass diffuse relighting
+  of reflected radiance and avoid applying a second color-management transform.
+- Preserve unselected faces and existing materials. No destructive mesh edits.
+- Store baked image with blend; indicate camera-specific validity.
+- Test wall/room behind mirror, tilted mirror, orthographic camera, scaled
+  objects, viewport/F12 parity, undo, failed bake, save/reopen, and memory cleanup.
+
+Future live mode can reuse the capture path and a reusable render target.
+No claim of complete memory or visual validation until GPU capture exists.
