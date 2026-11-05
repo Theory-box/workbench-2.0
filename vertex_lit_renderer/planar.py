@@ -163,6 +163,38 @@ def reflected_camera(camera_world, projection, point, normal, clip_bias=0.001):
     return view, clipped
 
 
+def cropped_projection(obj, faces, camera_vp, reflection_vp, resolution, aspect):
+    """Clip face polygons to the camera frustum before deriving capture bounds."""
+    points=[]
+    for index in faces:
+        poly=[camera_vp @ (obj.matrix_world @ obj.data.vertices[i].co).to_4d()
+              for i in obj.data.polygons[index].vertices]
+        for axis,sign in ((0,1),(0,-1),(1,1),(1,-1),(2,1),(2,-1)):
+            result=[]
+            for a,b in zip(poly,poly[1:]+poly[:1]):
+                da=a.w+sign*a[axis];db=b.w+sign*b[axis]
+                if da>=0:result.append(a)
+                if (da>=0)!=(db>=0):result.append(a+(b-a)*(da/(da-db)))
+            poly=result
+            if not poly:break
+        points.extend((p.x/p.w,p.y/p.w) for p in poly if p.w>1e-8)
+    if not points:raise ValueError('Selected reflection faces are outside the bake camera view')
+    lo=[min(p[i] for p in points) for i in (0,1)]
+    hi=[max(p[i] for p in points) for i in (0,1)]
+    for i in (0,1):
+        span=hi[i]-lo[i]
+        if span<1e-6:raise ValueError('Reflection faces are edge-on to the camera')
+        padding=max(span*.08,4.0/resolution)
+        lo[i]-=padding;hi[i]+=padding
+    spans=[hi[i]-lo[i] for i in (0,1)]
+    crop=Matrix.Identity(4)
+    for i in (0,1):
+        crop[i][i]=2.0/spans[i];crop[i][3]=-(hi[i]+lo[i])/spans[i]
+    ratio=aspect*spans[0]/spans[1]
+    width,height=(resolution,max(1,round(resolution/ratio))) if ratio>=1 else (max(1,round(resolution*ratio)),resolution)
+    return crop@reflection_vp,width,height
+
+
 def capture(engine, depsgraph, obj):
     """Capture from an owning renderer's GPU context, reusing its scene batches.
 
@@ -183,13 +215,12 @@ def capture(engine, depsgraph, obj):
     settings = scene.vertex_lit
     aspect = (scene.render.resolution_x * scene.render.pixel_aspect_x /
               max(1, scene.render.resolution_y * scene.render.pixel_aspect_y))
-    width = state.resolution
-    height = max(1, round(width/aspect))
-    if height > 4096:
-        width = max(1, round(4096*aspect)); height = 4096
-    projection = camera.calc_matrix_camera(depsgraph, x=width, y=height)
+    projection = camera.calc_matrix_camera(depsgraph,
+        x=scene.render.resolution_x,y=scene.render.resolution_y,
+        scale_x=scene.render.pixel_aspect_x,scale_y=scene.render.pixel_aspect_y)
     view, clipped = reflected_camera(camera.matrix_world, projection, point, normal)
-    vp = clipped @ view
+    vp,width,height = cropped_projection(obj,faces,projection@camera.matrix_world.inverted(),
+                                        clipped@view,state.resolution,aspect)
     names = ('_strict_capture','_final_render','_cull','_cam_pos','_view_mat3','_aux_active',
              '_film_transparent','_sun','_shadow_texel','_shadow_dirty','_shadow_tex_cache')
     absent = object()
