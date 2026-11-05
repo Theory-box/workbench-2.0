@@ -1288,3 +1288,33 @@ def _variant(n):
         for e in cr.elements:
             v.append(repr((float(e.position), tuple(float(c) for c in e.color))))
     return t + "|" + ",".join(v)
+
+
+def transpile_reflection_properties(mat):
+    """Read supported surface roughness/metallic/IOR without mutating its graph.
+
+    Returns a separate program description, so its uniforms and image samplers
+    cannot collide with the base-colour program. Unsupported surface roots are
+    explicit errors rather than silently becoming mirror-like.
+    """
+    res = TranspileResult()
+    base = _find_base_socket(mat) if mat and mat.use_nodes else None
+    if base is None or base.node.type not in {'BSDF_PRINCIPLED', 'BSDF_DIFFUSE'}:
+        raise ValueError('Planar reflection requires a supported Principled or Diffuse surface')
+    node = base.node
+    t = _Transpiler()
+    def value(name, default):
+        socket = node.inputs.get(name)
+        return t.input_expr(node, socket, 'float') if socket is not None else str(default)
+    rough = value('Roughness', 0.5)
+    metal = value('Metallic', 0.0)
+    ior = value('IOR', 1.5)
+    level = value('Specular IOR Level', 0.5)
+    res.glsl = ('vec4 computeReflectionProperties(vec2 vUV) {\n' +
+                '\n'.join(t.lines) + '\nreturn vec4(clamp('+rough+',0.0,1.0),'
+                'clamp('+metal+',0.0,1.0),max('+ior+',1.0),max('+level+',0.0));\n}')
+    res.samplers, res.params, res.param_decls = t.samplers, t.params, t.param_decls
+    res.notes.extend(t.notes)
+    res.helpers = glsl_lib.collect(res.glsl)
+    res.ok = True
+    return res
