@@ -311,6 +311,8 @@ class VLR_OT_planar_bake(bpy.types.Operator):
                 slot=obj.data.polygons[index].material_index
                 mat=obj.material_slots[slot].material if slot<len(obj.material_slots) else None
                 node_transpiler.transpile_reflection_properties(mat)
+                if node_transpiler.transpile_material(mat).has_alpha:
+                    raise ValueError("This bake currently requires an opaque reflector material")
             if any(m.show_viewport for m in obj.modifiers):
                 raise ValueError('Apply or disable modifiers on the reflector before baking')
             configure_faces(obj,faces,context.scene.camera)

@@ -1,31 +1,31 @@
-Planar reflection bake investigation
+Planar reflection bake - experimental v0.18.0
 
-Status: geometry math only; no UI or reflection capture installed.
+1. Restart Blender after installing. Choose Workbench 2.0 and Rendered viewport.
+2. Set the scene camera to the view you intend to render.
+3. Give the reflector an existing Principled material. For a sharp mirror,
+   use Metallic 1 and Roughness 0. Roughness maps remain connected as normal.
+4. In Edit Mode select only the front face, or a set of coplanar faces.
+5. Open the viewport N sidebar > Workbench 2.0 > Planar Reflection Bake.
+6. Click Bake / Rebake Planar Reflection. Wait for the Baked status.
+7. Return to Object Mode. Bake again to reuse the configured face selection.
+8. Clear Reflections removes this object's assignment. Unreferenced images
+   created by this feature are removed; images shared elsewhere are retained.
 
-First scope: selected coplanar faces, active scene camera, sharp single-bounce
-reflection, explicit Bake/Rebake. Store camera and plane transforms with image.
+One plane and camera-specific bake per object. Stored images are packed into
+.blend files. Use the baked camera view for correct perspective. Rebake after
+moving the camera, objects, or lights. Existing images remain until a new
+capture succeeds. Shared materials and linked mesh data are not modified.
 
-Reuse existing evaluated scene, mesh GPU buffers, materials, and textures.
-Queue capture in an active renderer draw callback, where the owning GPU context
-and prepared geometry exist. Do not instantiate another scene or RenderEngine.
-Wait for geometry/material queues to finish before capturing.
+Current limits: opaque Principled/Diffuse surface graphs supported by the node
+translator; apply/disable reflector modifiers before baking. Transparent
+reflectors, recursive reflections, curved surfaces, live updates, and physically
+accurate rough-reflection scattering are not implemented. Roughness uses a
+finite image filter. Reflections on other objects are not included in captures.
+No duplicate scene or vertex buffers; selected-face index buffers, cached
+reflection shaders, a stored image, and temporary capture/shadow targets are used.
 
-Additional resources: temporary reflected-view color/depth target, potentially
-a shadow target if the current shadow coverage does not cover the reflected view,
-and the persistent baked image. Avoid permanently retaining both CPU/GPU copies
-of intermediate capture data. Use bulk pixel transfer, not Python pixel lists.
-
-Required integration checks:
-- Reflection changes handedness: invert culling relative to object mirroring.
-- Clip at mirror plane; exclude selected reflector from its own capture.
-- Keep capture view/culling/shadow state separate and restore state on errors.
-- Reuse light positions; freeze camera-following studio light to original view.
-- Project saved image using saved reflection matrix; bypass diffuse relighting
-  of reflected radiance and avoid applying a second color-management transform.
-- Preserve unselected faces and existing materials. No destructive mesh edits.
-- Store baked image with blend; indicate camera-specific validity.
-- Test wall/room behind mirror, tilted mirror, orthographic camera, scaled
-  objects, viewport/F12 parity, undo, failed bake, save/reopen, and memory cleanup.
-
-Future live mode can reuse the capture path and a reusable render target.
-No claim of complete memory or visual validation until GPU capture exists.
+Validated: reflected-camera clipping, perspective/orthographic projection math,
+shared-material/mesh isolation, GPU capture and shared-buffer identity, failure
+state restoration, linked roughness texture effect, bake/rebake/clear operators,
+image cleanup, packed image save/reopen, F12 with AO/shadows/outlines, and eight
+unchanged existing scene regression images. This remains an early test build.
