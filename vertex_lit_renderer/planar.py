@@ -126,12 +126,17 @@ class VLRPlanarSettings(bpy.types.PropertyGroup):
 
 
 def register():
+    if _cancel_pending not in bpy.app.handlers.load_pre:
+        bpy.app.handlers.load_pre.append(_cancel_pending)
     for cls in (VLRPlanarSettings,VLR_OT_planar_bake,VLR_OT_planar_clear,VLR_PT_planar):
         bpy.utils.register_class(cls)
     bpy.types.Object.vlr_planar = PointerProperty(type=VLRPlanarSettings)
 
 
 def unregister():
+    _cancel_pending(None)
+    if _cancel_pending in bpy.app.handlers.load_pre:
+        bpy.app.handlers.load_pre.remove(_cancel_pending)
     del bpy.types.Object.vlr_planar
     _PENDING.clear()
     for cls in (VLR_PT_planar,VLR_OT_planar_clear,VLR_OT_planar_bake,VLRPlanarSettings):
@@ -280,6 +285,15 @@ def capture(engine, depsgraph, obj):
         gpu.state.face_culling_set(getattr(engine,'_cull','NONE'))
 
 _PENDING = []
+_GENERATION = 0
+
+
+@bpy.app.handlers.persistent
+def _cancel_pending(_unused):
+    global _GENERATION
+    _GENERATION += 1
+    _PENDING.clear()
+
 
 
 def publish_capture(obj, pixels, projection):
@@ -313,7 +327,9 @@ def process_pending(engine, context, depsgraph):
     except Exception as exc:
         error=str(exc)
     # A clear/reconfigure between capture and publication must cancel publication.
+    generation=_GENERATION
     def finish():
+        if generation!=_GENERATION:return
         try:
             state=obj.vlr_planar
             if token!=state.revision or not state.faces:return
