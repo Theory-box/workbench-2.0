@@ -83,6 +83,18 @@ def draw(self,context,dg):
       rough=np.array(buf).reshape(256,256,4)
       assert np.max(np.abs(rough-overlay))>.02,'Roughness map has no visible effect'
       np.save(root.parent/'work'/'planar-overlay-rough.npy',rough)
+      output=mirror_mat.node_tree.nodes.get('Material Output')
+      glass=mirror_mat.node_tree.nodes.new('ShaderNodeBsdfGlass')
+      mirror_mat.node_tree.links.new(glass.outputs[0],output.inputs['Surface'])
+      bpy.context.view_layer.update()
+      fb.clear(color=(0,0,0,1),depth=1)
+      planar_overlay.draw(self,bpy.context.evaluated_depsgraph_get(),projection@view)
+      assert False in self._planar_overlay_cache.values(),'Unsupported graph did not disable overlay'
+      mirror_mat.node_tree.links.new(mirror_mat.node_tree.nodes.get('Principled BSDF').outputs[0],output.inputs['Surface'])
+      bpy.context.view_layer.update()
+      planar_overlay.draw(self,bpy.context.evaluated_depsgraph_get(),projection@view)
+      assert False not in self._planar_overlay_cache.values(),'Supported graph did not recover'
+
 
     finally:target.free()
     # Repeated successful publication must release the previous owned image.

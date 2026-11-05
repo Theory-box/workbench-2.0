@@ -82,12 +82,20 @@ def draw(engine,depsgraph,view_projection):
                 live.add(key)
                 item=cache.get(key)
                 if item is None:
-                    res=node_transpiler.transpile_reflection_properties(mat)
-                    decl=''.join('uniform sampler2D '+s.uniform+';\n' for s in res.samplers)+'\n'.join(res.param_decls)
-                    sh=gpu.types.GPUShader(shaders.PHONG_VERT,_FRAGMENT+decl+res.helpers+res.glsl+_MAIN)
-                    ibo=gpu.types.GPUIndexBuf(type='TRIS',seq=indices)
-                    batch=gpu.types.GPUBatch(type='TRIS',buf=data['vbo'],elem=ibo);batch.vertbuf_add(data['vbo2'])
-                    item=cache[key]=(sh,batch,res,data['vbo'])
+                    try:
+                        res=node_transpiler.transpile_reflection_properties(mat)
+                        decl=''.join('uniform sampler2D '+s.uniform+';\n' for s in res.samplers)+'\n'.join(res.param_decls)
+                        sh=gpu.types.GPUShader(shaders.PHONG_VERT,_FRAGMENT+decl+res.helpers+res.glsl+_MAIN)
+                        ibo=gpu.types.GPUIndexBuf(type='TRIS',seq=indices)
+                        batch=gpu.types.GPUBatch(type='TRIS',buf=data['vbo'],elem=ibo);batch.vertbuf_add(data['vbo2'])
+                        item=cache[key]=(sh,batch,res,data['vbo'])
+                    except Exception as exc:
+                        # A material edit can invalidate a previously valid bake graph.
+                        # Disable this overlay until its graph changes, without retrying
+                        # the same failed compilation or breaking unrelated scene draws.
+                        print('[VertexLit] planar material skipped:',mat.name,str(exc))
+                        item=cache[key]=False
+                if item is False:continue
                 sh,batch,res,_=item;sh.bind()
                 sh.uniform_float('uViewProj',view_projection);sh.uniform_float('uModel',evaluated.matrix_world)
                 sh.uniform_float('uNormalMat',evaluated.matrix_world.to_3x3().inverted_safe().transposed())
