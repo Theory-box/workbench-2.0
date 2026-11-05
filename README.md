@@ -6,11 +6,19 @@ Experimental Blender renderer with live material-node previews, shadows, and scr
 
 ## Status
 
-Current version: **0.17.4**. Development and recent tests use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum; other versions have not been verified in this testing pass.
+Current version: **0.18.1 beta**. Development and recent tests use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum; other versions have not been verified in this testing pass.
 
 ## Install
 
-Zip the `vertex_lit_renderer` folder, then install that ZIP through Blender Preferences > Add-ons > Install from Disk. Enable the add-on and choose **Workbench 2.0** as the render engine. Restart Blender after replacing an existing installation.
+Download the add-on ZIP from [Releases](https://github.com/Theory-box/workbench-2.0/releases), then install that ZIP through Blender Preferences > Add-ons > Install from Disk. Enable the add-on and choose **Workbench 2.0** as the render engine. Restart Blender after replacing an existing installation.
+
+## Planar reflection baking
+
+Select the front face or coplanar faces in Edit Mode, enter Rendered viewport mode, and open **N sidebar > Workbench 2.0 > Planar Reflection Bake**. Set the scene camera, then click **Bake / Rebake**. In Object Mode, rebaking reuses the configured faces. **Clear Reflections** removes the assignment.
+
+The bake retains existing materials and supported roughness maps. Roughness changes filter the reflection live without recapturing the scene. For a sharp mirror, start with Metallic 1 and Roughness 0. Captures are cropped to the selected faces to use texture resolution efficiently, and images are packed into the blend file.
+
+This is a fixed-camera, single-plane bake per object. Rebake after camera, geometry, or lighting changes. Apply or disable reflector modifiers. Transparent and recursive reflections are not supported, and roughness filtering is approximate.
 
 ## Known limitations
 
