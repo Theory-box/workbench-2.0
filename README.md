@@ -6,7 +6,15 @@ Experimental Blender renderer with live material-node previews, shadows, and scr
 
 ## Status
 
-Current version: **0.18.1 beta**. Development and recent tests use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum; other versions have not been verified in this testing pass.
+Current version: **0.18.2 beta**. Development and recent tests use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum; other versions have not been verified in this testing pass.
+
+## Changes in 0.18.2 beta
+
+- Fix false black sun-shadowed surfaces when switching between cached material shaders.
+- Honor zero shadow softness and correct orthographic shadow-map coverage.
+- Reduce final-render pixel-transfer allocations and redundant CPU geometry storage.
+- Cache unchanged reflection geometry and harden bake cancellation, cleanup, and material-edit recovery.
+- Report final-render object draw failures instead of silently omitting objects.
 
 ## Install
 
@@ -24,8 +32,8 @@ This is a fixed-camera, single-plane bake per object. Rebake after camera, geome
 
 - Material graphs are translated to GLSL; support is incomplete and results can differ from Cycles or Eevee.
 - Partial-alpha sRGB image colors have a known mismatch against Cycles.
-- The published v0.18.1 beta uses Python pixel lists for final renders. The pending audit branch replaces this with bulk pixel transfer to reduce allocation overhead.
-- The pending audit branch propagates main object draw failures to the final-render error handler; broader GPU recovery remains experimental.
+- Shadow casters currently use geometry-only depth; material alpha is not evaluated for shadow casting.
+- Broader GPU failure recovery remains experimental.
 
 ## Development
 

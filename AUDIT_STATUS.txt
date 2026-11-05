@@ -1,16 +1,16 @@
-Pending audit changes: branch fix/post-beta-audit.
-User requested retaining these changes for the next explicitly requested push.
-Do not push, merge main, publish a release, or install an updated add-on during
-this audit: the user is testing the installed v0.18.1 beta.
+Audit record for the changes included in v0.18.2 beta.
+Publication to main and an updated beta release authorized by the user on
+2026-11-04. Earlier hold-publication statements below describe the audit period
+and are superseded by that authorization. Local installation remains unchanged.
 
-Pending starting commit: 9fa5d6c
+Audit starting commit: 9fa5d6c
 - Cache unchanged reflection face topology/triangulation.
 - Replace F12 Python pixel lists with direct NumPy transfer.
 - Invalidate stale queued captures on Clear/reconfigure.
 - Include material identity in reflection shader cache keys.
 
-Current goal: continue reproducible correctness, material, viewport, render,
-and resource-lifecycle audits; keep test evidence and findings on this branch.
+Audit scope: reproducible correctness, material, viewport, render, and
+resource-lifecycle checks. Findings and validation are recorded below.
 
 Completed audit findings:
 - Deleted queued objects no longer throw out of viewport drawing.
