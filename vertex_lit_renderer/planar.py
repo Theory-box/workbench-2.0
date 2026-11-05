@@ -303,14 +303,16 @@ def publish_capture(obj, pixels, projection):
 def process_pending(engine, context, depsgraph):
     if not _PENDING or getattr(engine,'_geo_pending',False) or getattr(engine,'_mat_pending',False):return
     obj = _PENDING.pop(0)
-    pixels=projection=None;error=None
+    pixels=projection=None;error=None;token=None
     try:
+        token=obj.vlr_planar.revision
         if obj.name not in context.scene.objects:return
         pixels, projection = capture(engine,depsgraph,obj)
+    except ReferenceError:
+        return  # queued object was deleted before the viewport could capture it
     except Exception as exc:
         error=str(exc)
     # A clear/reconfigure between capture and publication must cancel publication.
-    token=obj.vlr_planar.revision
     def finish():
         try:
             state=obj.vlr_planar

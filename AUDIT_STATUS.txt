@@ -1,0 +1,13 @@
+Pending audit changes: branch fix/post-beta-audit.
+User requested retaining these changes for the next explicitly requested push.
+Do not push, merge main, publish a release, or install an updated add-on during
+this audit: the user is testing the installed v0.18.1 beta.
+
+Pending starting commit: 9fa5d6c
+- Cache unchanged reflection face topology/triangulation.
+- Replace F12 Python pixel lists with direct NumPy transfer.
+- Invalidate stale queued captures on Clear/reconfigure.
+- Include material identity in reflection shader cache keys.
+
+Current goal: continue reproducible correctness, material, viewport, render,
+and resource-lifecycle audits; keep test evidence and findings on this branch.
