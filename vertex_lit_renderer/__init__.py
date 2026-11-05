@@ -18,8 +18,9 @@ import bpy
 
 
 def register():
-    from . import props, engine, ui, bake, splat_ops
+    from . import props, engine, ui, bake, splat_ops, planar
     props.register()
+    planar.register()
     engine.register()
     bake.register()
     splat_ops.register()
@@ -27,9 +28,10 @@ def register():
 
 
 def unregister():
-    from . import props, engine, ui, bake, splat_ops
+    from . import props, engine, ui, bake, splat_ops, planar
     ui.unregister()
     splat_ops.unregister()
     bake.unregister()
     engine.unregister()
+    planar.unregister()
     props.unregister()

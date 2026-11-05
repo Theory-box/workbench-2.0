@@ -2534,6 +2534,9 @@ class VertexLitEngine(bpy.types.RenderEngine):
         if not getattr(self, '_geo_pending', False):
             self._stream_textures(0.05)      # textures stream in once the geometry is complete
 
+        from . import planar
+        planar.process_pending(self, context, depsgraph)
+
         sky   =tuple(vls.sky_color)    if vls else (0.05,0.07,0.10)
         ground=tuple(vls.ground_color) if vls else (0.03,0.02,0.02)
         bstr  =0.0

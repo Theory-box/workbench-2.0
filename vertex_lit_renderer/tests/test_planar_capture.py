@@ -3,7 +3,7 @@ from mathutils import Vector
 root=pathlib.Path(__file__).resolve().parents[2];sys.path.insert(0,str(root))
 import vertex_lit_renderer as addon
 from vertex_lit_renderer import engine,planar
-addon.register();planar.register()
+addon.register()
 bpy.ops.object.select_all(action='SELECT');bpy.ops.object.delete(use_global=False)
 sc=bpy.context.scene;sc.render.engine='VERTEX_LIT';sc.render.resolution_x=256;sc.render.resolution_y=256
 sc.vertex_lit.use_shadows=False;sc.vertex_lit.use_ao=False

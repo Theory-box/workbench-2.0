@@ -120,13 +120,16 @@ class VLRPlanarSettings(bpy.types.PropertyGroup):
 
 
 def register():
-    bpy.utils.register_class(VLRPlanarSettings)
+    for cls in (VLRPlanarSettings,VLR_OT_planar_bake,VLR_OT_planar_clear,VLR_PT_planar):
+        bpy.utils.register_class(cls)
     bpy.types.Object.vlr_planar = PointerProperty(type=VLRPlanarSettings)
 
 
 def unregister():
     del bpy.types.Object.vlr_planar
-    bpy.utils.unregister_class(VLRPlanarSettings)
+    _PENDING.clear()
+    for cls in (VLR_PT_planar,VLR_OT_planar_clear,VLR_OT_planar_bake,VLRPlanarSettings):
+        bpy.utils.unregister_class(cls)
 
 
 def reflected_camera(camera_world, projection, point, normal, clip_bias=0.001):
@@ -238,3 +241,87 @@ def capture(engine, depsgraph, obj):
         gpu.state.viewport_set(*viewport)
         gpu.state.depth_test_set(depth); gpu.state.depth_mask_set(mask); gpu.state.blend_set(blend)
         gpu.state.face_culling_set(getattr(engine,'_cull','NONE'))
+
+_PENDING = []
+
+
+def process_pending(engine, context, depsgraph):
+    if not _PENDING or getattr(engine,'_geo_pending',False) or getattr(engine,'_mat_pending',False):return
+    obj = _PENDING.pop(0)
+    try:
+        if obj.name not in context.scene.objects:return
+        pixels, projection = capture(engine,depsgraph,obj)
+        h,w=pixels.shape[:2]
+        image=bpy.data.images.new(obj.name+'_PlanarReflection',width=w,height=h,alpha=True,float_buffer=True)
+        try:
+            image.colorspace_settings.name='Non-Color'
+            image.pixels.foreach_set(pixels.reshape(-1));image.update();image.pack()
+        except Exception:
+            bpy.data.images.remove(image);raise
+        obj.vlr_planar.projection=tuple(x for row in projection for x in row)
+        obj.vlr_planar.image=image
+        obj.vlr_planar.status='Baked for '+obj.vlr_planar.camera.name+'; rebake after scene changes'
+        engine.tag_redraw()
+    except Exception as exc:
+        try:obj.vlr_planar.status='Bake failed: '+str(exc)
+        except ReferenceError:pass
+        print('[VertexLit] planar bake failed:',exc)
+
+
+class VLR_OT_planar_bake(bpy.types.Operator):
+    bl_idname='vertex_lit.planar_bake'
+    bl_label='Bake / Rebake Planar Reflection'
+    bl_description='Bake selected coplanar faces for the scene camera; in Object Mode rebake the configured faces'
+    def execute(self,context):
+        obj=context.active_object
+        try:
+            if obj is None or obj.type!='MESH':raise ValueError('Select a mesh object')
+            if context.scene.render.engine!='VERTEX_LIT':raise ValueError('Choose Workbench 2.0 as the render engine')
+            if not any(a.type=='VIEW_3D' and a.spaces.active.shading.type=='RENDERED' for a in context.screen.areas):
+                raise ValueError('Open a Rendered viewport before baking')
+            if obj.mode=='EDIT':obj.update_from_editmode()
+            faces=selected_faces(obj) if obj.mode=='EDIT' or not obj.vlr_planar.faces else configured_faces(obj)
+            # Validate material support before changing assignment or queuing work.
+            from . import node_transpiler
+            for index in faces:
+                slot=obj.data.polygons[index].material_index
+                mat=obj.material_slots[slot].material if slot<len(obj.material_slots) else None
+                node_transpiler.transpile_reflection_properties(mat)
+            if any(m.show_viewport for m in obj.modifiers):
+                raise ValueError('Apply or disable modifiers on the reflector before baking')
+            configure_faces(obj,faces,context.scene.camera)
+            if obj not in _PENDING:_PENDING.append(obj)
+            obj.vlr_planar.status='Queued: waiting for rendered viewport'
+            for a in context.screen.areas:a.tag_redraw()
+        except Exception as exc:
+            self.report({'ERROR'},str(exc));return {'CANCELLED'}
+        return {'FINISHED'}
+
+
+class VLR_OT_planar_clear(bpy.types.Operator):
+    bl_idname='vertex_lit.planar_clear';bl_label='Clear Reflections'
+    bl_options={'REGISTER','UNDO'}
+    def execute(self,context):
+        obj=context.active_object
+        if obj is None:return {'CANCELLED'}
+        if obj in _PENDING:_PENDING.remove(obj)
+        clear_reflection(obj)
+        for a in context.screen.areas:a.tag_redraw()
+        return {'FINISHED'}
+
+
+class VLR_PT_planar(bpy.types.Panel):
+    bl_label='Planar Reflection Bake';bl_idname='VLR_PT_planar'
+    bl_space_type='VIEW_3D';bl_region_type='UI';bl_category='Workbench 2.0'
+    @classmethod
+    def poll(cls,context):
+        return context.active_object is not None and context.active_object.type=='MESH' and context.scene.render.engine=='VERTEX_LIT'
+    def draw(self,context):
+        layout=self.layout;state=context.active_object.vlr_planar
+        layout.label(text='Select coplanar faces in Edit Mode')
+        layout.label(text='Uses scene camera and existing material')
+        layout.prop(state,'resolution')
+        layout.operator('vertex_lit.planar_bake')
+        layout.operator('vertex_lit.planar_clear')
+        layout.label(text=state.status)
+        layout.label(text='Fixed view; rebake after scene changes')
