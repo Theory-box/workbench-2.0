@@ -776,7 +776,16 @@ def _build_light_space_fit(sun_dir, view_proj, cam_pos, shadow_distance, res, sc
         corners.append(Vector((p.x/w, p.y/w, p.z/w)))
     # Clamp the far corners to shadow_distance from the camera (limits the shadowed range).
     cam = Vector(cam_pos)
+    orthographic = all(abs(view_proj[3][i]) < 1e-9 for i in range(3))
     for i in range(4):
+        if orthographic:
+            # Parallel camera rays retain their lateral offsets. Pulling these
+            # corners toward the camera origin incorrectly narrows the far plane.
+            direction = (corners[i+4] - corners[i]).normalized()
+            distance = (corners[i+4] - cam).dot(direction)
+            if distance > shadow_distance:
+                corners[i+4] -= direction * (distance - shadow_distance)
+            continue
         ray = corners[i+4] - cam
         L = ray.length
         if L > shadow_distance and L > 1e-6:
@@ -796,7 +805,9 @@ def _build_light_space_fit(sun_dir, view_proj, cam_pos, shadow_distance, res, sc
     r_v = fwd.cross(up).normalized(); u_v = r_v.cross(fwd)
 
     # Texel-snap the sphere centre in light space so the map doesn't swim frame-to-frame.
-    texel = (2.0 * radius) / max(res, 1)
+    # Reserve half a texel on each side for centre snapping. Solve using the
+    # padded extent so the snap grid still matches the actual shadow texels.
+    texel = (2.0 * radius) / max(res - 1, 1)
     cx = round(r_v.dot(center) / texel) * texel
     cy = round(u_v.dot(center) / texel) * texel
     cz = fwd.dot(center)
@@ -807,7 +818,7 @@ def _build_light_space_fit(sun_dir, view_proj, cam_pos, shadow_distance, res, sc
     view = Matrix([[r_v.x, r_v.y, r_v.z, -r_v.dot(eye)],
                    [u_v.x, u_v.y, u_v.z, -u_v.dot(eye)],
                    [-fwd.x, -fwd.y, -fwd.z, fwd.dot(eye)], [0, 0, 0, 1]])
-    s = radius; n = 0.0; f = 2.0 * radius + margin
+    s = radius + texel * 0.5; n = 0.0; f = 2.0 * radius + margin
     ortho = Matrix([[1/s, 0, 0, 0], [0, 1/s, 0, 0],
                     [0, 0, -2/(f-n), -(f+n)/(f-n)], [0, 0, 0, 1]])
     return ortho @ view, texel

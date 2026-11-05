@@ -49,3 +49,20 @@ Audit branch's CPU geometry savings were not distinguishable from run-to-run
 variation in this house scene. Three samples/configuration, one fresh process;
 Windows allocation counters, not peak or physical VRAM residency. No user
 settings, installed files, or main/release changes were made for measurement.
+
+Sun-shadow audit (2026-11-04; branch only):
+- Softness 0 was clamped to 1. It now uses one depth lookup for a hard shadow;
+  values between 0 and 1 also work. Positive softness retains the 3x3 PCF path.
+- Orthographic shadow fitting incorrectly pulled far corners toward the camera
+  origin. Parallel rays now retain their lateral offsets. Half-texel padding
+  prevents centre snapping from excluding an otherwise covered frustum corner.
+- Controlled exterior/material tests did not reproduce the reported opaque
+  black surfaces. This report does NOT claim that user-visible issue is fixed.
+- Coverage: viewport warm/cold changes, scene lights, sun settings and limits,
+  mirrored instances, F12 borders/crops, reflection-capture shadow-state isolation,
+  textured instancing versus individual draws, and ambient-fill preservation.
+- Shadow casters still use geometry-only depth, without material alpha evaluation;
+  transparent/alpha-cutout shadow support is a separate existing limitation.
+- No installation, publication, main merge, or release. Preserve this work for
+  the next requested push. Detailed evidence: outputs/workbench-sun-shadow-audit.json
+  in the parent workspace; repeatable tests are included under tests/test_sun_shadow_*.

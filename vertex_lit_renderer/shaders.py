@@ -81,7 +81,12 @@ float vlr_shadow(vec3 wPos, vec3 N) {
     if (proj.x < 0.0 || proj.x > 1.0 || proj.y < 0.0 || proj.y > 1.0 || proj.z > 1.0)
         return 1.0;                                  /* outside the sun's frustum -> lit */
     float bias = uShadowBias * (1.0 + 4.0 * slope);  /* slope-scaled depth bias */
-    vec2 texel = (1.0 / vec2(textureSize(uShadowMap, 0))) * max(uShadowSoft, 1.0);
+    /* Zero means a hard shadow, without nine identical depth lookups. */
+    if (uShadowSoft <= 0.0) {
+        float d = textureLod(uShadowMap, proj.xy, 0.0).r;
+        return (proj.z - bias > d) ? 0.0 : 1.0;
+    }
+    vec2 texel = (1.0 / vec2(textureSize(uShadowMap, 0))) * uShadowSoft;
     float lit = 0.0;
     for (int x = -1; x <= 1; x++)
         for (int y = -1; y <= 1; y++) {
