@@ -43,3 +43,87 @@ def plane_from_faces(mesh, matrix_world, face_indices, tolerance=1e-5):
     if any(abs((p-origin).dot(normal)) > tolerance for p in points):
         raise ValueError('Selected faces must lie on one plane')
     return origin, normal
+
+# Object-owned metadata deliberately avoids mesh attributes: linked mesh objects
+# and shared materials must not inherit another object's reflection assignment.
+def topology_signature(mesh):
+    import hashlib
+    import numpy as np
+    loops = np.empty(len(mesh.loops), dtype=np.int32)
+    counts = np.empty(len(mesh.polygons), dtype=np.int32)
+    mesh.loops.foreach_get('vertex_index', loops)
+    mesh.polygons.foreach_get('loop_total', counts)
+    return hashlib.sha256(loops.tobytes() + counts.tobytes()).hexdigest()
+
+
+def configure_faces(obj, face_indices, camera):
+    """Validate before replacing metadata; existing bake survives invalid input."""
+    if obj.type != 'MESH':
+        raise ValueError('Select a mesh object')
+    if camera is None or camera.type != 'CAMERA':
+        raise ValueError('Choose a scene camera')
+    indices = sorted(set(int(i) for i in face_indices))
+    point, normal = plane_from_faces(obj.data, obj.matrix_world, indices)
+    state = obj.vlr_planar
+    state.faces = ','.join(map(str, indices))
+    state.topology = topology_signature(obj.data)
+    state.camera = camera
+    state.point = point
+    state.normal = normal
+    state.status = 'Needs bake'
+    return point, normal
+
+
+def selected_faces(obj):
+    if obj.mode == 'EDIT':
+        import bmesh
+        bm = bmesh.from_edit_mesh(obj.data)
+        bm.faces.ensure_lookup_table()
+        return [i for i, face in enumerate(bm.faces) if face.select]
+    return [face.index for face in obj.data.polygons if face.select]
+
+
+def configured_faces(obj):
+    state = obj.vlr_planar
+    if not state.faces:
+        raise ValueError('No reflection faces configured')
+    if topology_signature(obj.data) != state.topology:
+        raise ValueError('Mesh topology changed; select the reflection faces again')
+    return [int(i) for i in state.faces.split(',')]
+
+
+def clear_reflection(obj):
+    """Detach only this object's bake; never delete possibly shared image data."""
+    state = obj.vlr_planar
+    state.image = None
+    state.camera = None
+    state.faces = ''
+    state.topology = ''
+    state.status = 'Not configured'
+    obj.update_tag()
+
+
+import bpy
+from bpy.props import StringProperty, PointerProperty, FloatVectorProperty, IntProperty
+
+
+class VLRPlanarSettings(bpy.types.PropertyGroup):
+    faces: StringProperty()
+    topology: StringProperty()
+    camera: PointerProperty(type=bpy.types.Object)
+    image: PointerProperty(type=bpy.types.Image)
+    point: FloatVectorProperty(size=3)
+    normal: FloatVectorProperty(size=3, default=(0, 0, 1))
+    projection: FloatVectorProperty(size=16)
+    resolution: IntProperty(name='Resolution', default=1024, min=64, max=4096)
+    status: StringProperty(default='Not configured')
+
+
+def register():
+    bpy.utils.register_class(VLRPlanarSettings)
+    bpy.types.Object.vlr_planar = PointerProperty(type=VLRPlanarSettings)
+
+
+def unregister():
+    del bpy.types.Object.vlr_planar
+    bpy.utils.unregister_class(VLRPlanarSettings)
