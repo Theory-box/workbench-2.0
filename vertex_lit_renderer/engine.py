@@ -1,0 +1,2884 @@
+# vertex_lit_renderer/engine.py
+
+import time
+import threading
+import os
+import numpy as np
+import bpy
+import gpu
+from gpu_extras.batch import batch_for_shader
+from gpu_extras.presets import draw_texture_2d
+from mathutils import Matrix, Vector
+
+from .shaders import SHADOW_VERT, SHADOW_FRAG, PHONG_VERT, PHONG_FRAG, WORKBENCH_FRAG, ID_VERT, ID_FRAG, NORMAL_VERT, NORMAL_FRAG, VIEWMODE_FRAG, BG_VERT, BG_FRAG
+from . import material_shader
+from . import fx
+from . import instancing
+import ctypes as _ct
+
+# Persistent caches — survive engine instances (leaving/re-entering rendered view
+# destroys the engine but NOT these). Re-entry reuses the extracted data AND the GPU
+# batches, so unchanged objects need no work at all. A cheap signature detects changes
+# made while away. If a persisted batch is ever stale (GPU context changed), drawing it
+# raises and we self-heal by re-extracting that object. Cleared on unregister.
+_PERSIST_MESH = {}     # obj name -> extraction data dict
+_PERSIST_BATCH = {}    # obj name -> [(batch, material_name, texture), ...]
+_PERSIST_SHADOW = {}   # obj name -> shadow batch
+_PERSIST_SIG = {}      # obj name -> cheap geometry signature
+_FORCE_REEXTRACT = False   # set when the chosen colour attribute changes -> full re-extract
+
+
+def _model_cull(cull, model):
+    if cull != 'NONE' and model.is_negative:
+        return 'FRONT' if cull == 'BACK' else 'BACK'
+    return cull
+
+
+def _area_resize(arr, W, H):
+    """Area-average resize of an (h, w, 4) float image to (H, W, 4) — used to downscale a
+    supersampled F12 render. Correct for any (including non-integer) ratio."""
+    import numpy as _np
+    sh, sw = arr.shape[0], arr.shape[1]
+    if sw == W and sh == H:
+        return arr
+
+    def _axis(a, out):
+        n = a.shape[0]
+        cs = _np.zeros((n + 1,) + a.shape[1:], dtype=_np.float64)
+        cs[1:] = _np.cumsum(a, axis=0)
+        edges = _np.linspace(0.0, n, out + 1)
+
+        def _cs_at(pos):
+            p0 = _np.floor(pos).astype(int)
+            frac = (pos - p0).reshape((-1,) + (1,) * (a.ndim - 1))
+            p0c = _np.clip(p0, 0, n)
+            p1c = _np.clip(p0 + 1, 0, n)
+            return cs[p0c] + (cs[p1c] - cs[p0c]) * frac
+
+        total = _cs_at(edges[1:]) - _cs_at(edges[:-1])
+        widths = (edges[1:] - edges[:-1]).reshape((-1,) + (1,) * (a.ndim - 1))
+        return (total / _np.maximum(widths, 1e-9)).astype(_np.float32)
+
+    arr = _axis(arr, H)                                    # resample rows
+    arr = _axis(arr.transpose(1, 0, 2), W).transpose(1, 0, 2)   # resample columns
+    return arr
+
+
+def _compute_sun(vls):
+    """Sun params from Height (elevation) + Angle (azimuth): returns
+    (dir_to_sun, colour, intensity, hemisphere_intensity)."""
+    import math
+    if vls is None:
+        return ((0.0, 0.0, 1.0), (1.0, 1.0, 1.0), 0.0, 1.0)
+    el = getattr(vls, 'sun_elevation', 0.785398)
+    az = getattr(vls, 'sun_azimuth', 0.785398)
+    ce = math.cos(el)
+    d = (ce * math.sin(az), ce * math.cos(az), math.sin(el))   # direction TO the sun
+    return (d, tuple(vls.sun_color), float(vls.sun_intensity),
+            float(getattr(vls, 'hemi_intensity', 1.0)))
+
+
+def _material_transparent(mat):
+    """Decide at DRAW time whether a material is alpha-blended, from its CURRENT state (not a
+    cached compile-time flag, which goes stale when the Alpha value is tweaked without a
+    structural change). Blended -> yes; Opaque -> no; otherwise transparent only if the
+    Principled Alpha is actually linked or < 1."""
+    if mat is None:
+        return False
+    sr = getattr(mat, 'surface_render_method', None)
+    bm = getattr(mat, 'blend_method', 'OPAQUE')
+    if sr == 'BLENDED' or bm == 'BLEND':
+        return True
+    if sr == 'OPAQUE':
+        return False
+    nt = getattr(mat, 'node_tree', None)
+    if nt is not None:
+        for n in nt.nodes:
+            if n.type == 'BSDF_PRINCIPLED':
+                a = n.inputs.get('Alpha')
+                if a is not None:
+                    if a.is_linked:
+                        return True
+                    try:
+                        if float(a.default_value) < 0.999:
+                            return True
+                    except Exception:
+                        pass
+    return False
+
+
+_SIG_MEMO = {}   # id(evaluated mesh) -> geo signature, cleared each rebuild pass
+
+
+def _np_hash(a):
+    """Cheap order-sensitive hash of a numpy buffer (not cryptographic; just change detection)."""
+    b = np.ascontiguousarray(a)
+    return int(hash(b.tobytes()))
+
+
+def _attr_array(mesh, name, dtype, ncomp, n):
+    """Read a named mesh attribute in one contiguous foreach_get. Measured ~8x faster than going
+    through mesh.polygons / uv_layers.data Python wrappers (29ms vs 232ms per 1M-poly mesh)."""
+    try:
+        a = mesh.attributes.get(name)
+        if a is None or n == 0:
+            return None
+        field = 'value' if ncomp == 1 else ('vector' if ncomp in (2, 3) else 'color')
+        buf = np.empty(n * ncomp, dtype=dtype)
+        a.data.foreach_get(field, buf)
+        return buf
+    except Exception:
+        return None
+
+
+def _geo_sig(obj, mesh, attr_name=''):
+    """Signature to detect whether an object's geometry changed while we weren't watching.
+
+    This also gates the linked-duplicate SHARE cache, so a signature that misses an edit makes the
+    engine serve PRE-EDIT geometry (edits appear to vanish). It must therefore cover real edits:
+    vertex moves, UVs, material indices, smooth/flat, vertex paint, sculpt and shape keys.
+
+    Reads go through mesh.attributes (one contiguous foreach_get each) rather than the per-element
+    Python wrappers -- the wrapper route cost ~209ms/1M polys and doubled scene-entry time.
+    The result is memoised on the evaluated mesh so _share_sig + the rebuild loop don't recompute
+    it (it was being hashed twice per object)."""
+    # Memo per rebuild pass. (A previous attempt stored this ON the mesh; Blender rejects custom
+    # attributes on bpy_struct, so every object was still hashed twice -- once by _share_sig and
+    # once by the rebuild loop.)
+    mods = tuple((m.type, bool(m.show_viewport)) for m in obj.modifiers)
+    base = getattr(getattr(obj, 'data', None), 'name', '')
+    ck = (mesh.as_pointer(), base, mods, attr_name)
+    cached = _SIG_MEMO.get(ck)
+    if cached is not None:
+        return cached
+    try:
+        nv = len(mesh.vertices)
+        npoly = len(mesh.polygons)
+        nl = len(mesh.loops)
+        h = 0
+        if nv:
+            co = np.empty(nv * 3, dtype=np.float32)
+            mesh.vertices.foreach_get('co', co)          # already a fast contiguous read
+            h ^= _np_hash(co)
+        # Positions and face counts alone do not identify geometry. A flipped
+        # diagonal, changed winding, or custom corner normals can keep both.
+        if nl:
+            vi = np.empty(nl, dtype=np.int32)
+            mesh.loops.foreach_get('vertex_index', vi)
+            h ^= _np_hash(vi) * 13
+            normals = np.empty(nl * 3, dtype=np.float32)
+            mesh.corner_normals.foreach_get('vector', normals)
+            h ^= _np_hash(normals) * 17
+        if npoly:
+            totals = np.empty(npoly, dtype=np.int32)
+            mesh.polygons.foreach_get('loop_total', totals)
+            h ^= _np_hash(totals) * 19
+        mi = _attr_array(mesh, 'material_index', np.int32, 1, npoly)
+        if mi is not None: h ^= _np_hash(mi) * 3
+        sh = _attr_array(mesh, 'sharp_face', np.bool_, 1, npoly)
+        if sh is not None: h ^= _np_hash(sh.view(np.uint8)) * 5
+        uvl = mesh.uv_layers.active
+        if uvl is not None and nl:
+            uv = _attr_array(mesh, uvl.name, np.float32, 2, nl)
+            if uv is None:
+                uv = np.empty(nl * 2, dtype=np.float32); uvl.data.foreach_get('uv', uv)
+            h ^= _np_hash(uv) * 7
+        ca = getattr(mesh, 'color_attributes', None)
+        act = (ca.get(attr_name) if attr_name else getattr(ca, 'active_color', None)) if ca is not None else None
+        if act is not None and len(act.data):
+            cc = _attr_array(mesh, act.name, np.float32, 4, len(act.data))
+            if cc is None:
+                cc = np.empty(len(act.data) * 4, dtype=np.float32); act.data.foreach_get('color', cc)
+            h ^= _np_hash(cc) * 11
+        sig = (base, nv, npoly, mods, h)
+    except Exception:
+        return None
+    _SIG_MEMO[ck] = sig
+    return sig
+
+
+def _share_sig(obj, mesh, view_attr):
+    """Key for geometry that can be SHARED across objects (e.g. linked duplicates): the
+    geometry signature + material assignment + active colour attribute. Objects with the
+    same key have identical evaluated geometry and materials, so one extraction + one GPU
+    batch serves them all (drawn per-instance with their own matrices)."""
+    try:
+        mats = tuple((s.material.name if s.material else '') for s in obj.material_slots)
+    except Exception:
+        mats = ()
+    return (_geo_sig(obj, mesh, view_attr), mats, view_attr or '')
+
+
+def _draw_key(inst):
+    """Cache/draw key for a depsgraph instance. Normal objects key by their own name.
+    Instances share geometry by mesh and material bindings, and draw with their own matrices.
+    Object-linked material overrides must not collide merely because the mesh is shared."""
+    o = inst.object
+    if getattr(inst, 'is_instance', False):
+        d = getattr(o, 'data', None)
+        if d is not None:
+            materials = tuple(s.material.name if s.material else None for s in o.material_slots)
+            return 'i:' + repr((d.name, materials))
+    return o.name
+
+
+def _raw_attr(mesh, name, ctype, ncomp, count):
+    """Read a mesh attribute as a numpy array DIRECTLY from Blender's contiguous
+    memory (via the layer's pointer) — ~5x faster than foreach_get on the hot arrays.
+    Returns an (count, ncomp) view or None (caller then uses the foreach_get fallback).
+    Version-tolerant: any layout surprise -> None -> safe slow path."""
+    try:
+        a = mesh.attributes.get(name)
+        if a is None: return None
+        data = a.data
+        if len(data) != count or count == 0: return None
+        addr = data[0].as_pointer()
+        arr = np.ctypeslib.as_array((ctype * (count * ncomp)).from_address(addr))
+        return arr.reshape(count, ncomp) if ncomp > 1 else arr
+    except Exception:
+        return None
+
+
+def _raw_corner_tris(mesh, n_tris):
+    """Triangle -> 3 corner indices, read straight from the runtime corner-tris array."""
+    try:
+        if n_tris == 0: return None
+        addr = mesh.loop_triangles[0].as_pointer()
+        return np.ctypeslib.as_array((_ct.c_int * (n_tris * 3)).from_address(addr))
+    except Exception:
+        return None
+
+MAX_LIGHTS = 8
+_DEBUG = True   # prints "[VertexLit] rebuild <- ..." naming what triggers a rebuild
+
+# ── GI redraw timer ───────────────────────────────────────────────────────────
+# Backup for self.tag_redraw() — forces redraws at 20 fps while GI runs.
+# Uses bpy.data (always valid in timers) not bpy.context (may be None).
+
+_post_err_shown = False  # print the post-pipeline traceback only once
+
+# ── Shader singletons ─────────────────────────────────────────────────────────
+
+_shadow_shader = None
+_main_shader   = {}   # shading mode -> GPUShader
+_id_shader     = None  # object-id pass shader (outline)
+
+def _get_shadow_shader():
+    global _shadow_shader
+    if _shadow_shader is None:
+        _shadow_shader = gpu.types.GPUShader(SHADOW_VERT, SHADOW_FRAG)
+    return _shadow_shader
+
+def _get_id_shader():
+    global _id_shader
+    if _id_shader is None:
+        _id_shader = gpu.types.GPUShader(ID_VERT, ID_FRAG)
+    return _id_shader
+
+_normal_shader = None
+def _get_normal_shader():
+    global _normal_shader
+    if _normal_shader is None:
+        _normal_shader = gpu.types.GPUShader(NORMAL_VERT, NORMAL_FRAG)
+    return _normal_shader
+
+_viewmode_shader = None
+def _get_viewmode_shader():
+    global _viewmode_shader
+    if _viewmode_shader is None:
+        _viewmode_shader = gpu.types.GPUShader(PHONG_VERT, VIEWMODE_FRAG)
+    return _viewmode_shader
+
+_bg_shader = None
+_bg_batch = None
+def _get_bg():
+    global _bg_shader, _bg_batch
+    if _bg_shader is None:
+        from gpu_extras.batch import batch_for_shader
+        _bg_shader = gpu.types.GPUShader(BG_VERT, BG_FRAG)
+        _bg_batch = batch_for_shader(_bg_shader, 'TRIS',
+                                     {"pos": [(-1.0, -1.0), (3.0, -1.0), (-1.0, 3.0)]})
+    return _bg_shader, _bg_batch
+
+_VIEWMODE_ID = {'SOLID': 1, 'RANDOM': 2, 'ATTRIBUTE': 3, 'NORMAL': 4, 'DEPTH': 5}
+
+def _obj_random_color(name):
+    """Stable pseudo-random colour per object (Blender-like), from the object name."""
+    import hashlib
+    h = hashlib.md5(name.encode('utf-8')).digest()
+    return (0.15 + 0.8 * (h[0] / 255.0), 0.15 + 0.8 * (h[1] / 255.0), 0.15 + 0.8 * (h[2] / 255.0))
+
+def _get_main_shader(mode='PIXEL'):
+    sh = _main_shader.get(mode)
+    if sh is None:
+        if mode == 'WORKBENCH':
+            sh = gpu.types.GPUShader(PHONG_VERT, WORKBENCH_FRAG)
+        else:
+            sh = gpu.types.GPUShader(PHONG_VERT, PHONG_FRAG)   # PIXEL (lit)
+        _main_shader[mode] = sh
+    return sh
+
+# ── GPU texture cache ─────────────────────────────────────────────────────────
+
+_tex_cache: dict = {}
+
+def _invalidate_tex(name):
+    _tex_cache.pop(name, None)
+
+def _get_gpu_tex(image):
+    if image is None: return None
+    if image.name not in _tex_cache:
+        try:
+            _tex_cache[image.name] = gpu.texture.from_image(image)
+        except Exception as e:
+            print(f"[VertexLit] tex error ({image.name}): {e}")
+            _tex_cache[image.name] = None
+    return _tex_cache[image.name]
+
+def _find_base_texture(mat):
+    if not mat or not mat.use_nodes: return None
+    for node in mat.node_tree.nodes:
+        if node.type == 'BSDF_PRINCIPLED':
+            sock = node.inputs.get('Base Color')
+            if sock and sock.is_linked:
+                src = sock.links[0].from_node
+                if src.type == 'TEX_IMAGE' and src.image:
+                    return src.image
+    for node in mat.node_tree.nodes:
+        if node.type == 'TEX_IMAGE' and node.image:
+            return node.image
+    return None
+
+
+def _image_bytes(img):
+    """Cheap load-cost proxy for ordering texture streaming (packed or on-disk file size).
+    Never touches img.size, which would decode the image."""
+    try:
+        pf = img.packed_file
+        if pf is not None:
+            return int(pf.size)
+        p = bpy.path.abspath(img.filepath)
+        return os.path.getsize(p) if p and os.path.exists(p) else 0
+    except Exception:
+        return 0
+
+# ── Geometry-first extraction (v0.16.5) ───────────────────────────────────────
+# One GPU batch per mesh: per-CORNER vertex buffers (position + normal/vertColor/texCoord) and ONE
+# index buffer of triangles sorted by material, so each material slot is a contiguous index range
+# drawn with GPUBatch.draw_range. Vertex data is uploaded exactly once (no per-slot copies; ~2.4x
+# less memory than the per-triangle-corner layout) and textures are NOT loaded here -- they stream
+# in afterwards, smallest first (VertexLitEngine._stream_textures). Expanding the buffers through the
+# ranges reproduces _extract_mesh_data's per-slot arrays exactly (prototype: Azola 394/394 objects).
+_GEO_FAST_OK = hasattr(gpu.types.GPUBatch, 'draw_range') and hasattr(gpu.types.GPUBatch, 'vertbuf_add')
+_KEEP_CPU_ARRAYS = os.environ.get('VLR_KEEP_CPU_ARRAYS') == '1'   # tests: keep normals/UVs/colours on CPU
+_EXTRACT_PROF = {} if os.environ.get('VLR_PROFILE_EXTRACT') == '1' else None   # tests: seconds per stage
+
+
+def _prof(key, t0):
+    if _EXTRACT_PROF is None:
+        return t0
+    t = time.perf_counter()
+    _EXTRACT_PROF[key] = _EXTRACT_PROF.get(key, 0.0) + (t - t0)
+    return t
+_GEO_FORMATS = []
+
+
+def _geo_formats():
+    if not _GEO_FORMATS:
+        fp = gpu.types.GPUVertFormat()
+        fp.attr_add(id='position', comp_type='F32', len=3, fetch_mode='FLOAT')
+        fa = gpu.types.GPUVertFormat()
+        fa.attr_add(id='normal', comp_type='F32', len=3, fetch_mode='FLOAT')
+        fa.attr_add(id='vertColor', comp_type='F32', len=4, fetch_mode='FLOAT')
+        fa.attr_add(id='texCoord', comp_type='F32', len=2, fetch_mode='FLOAT')
+        _GEO_FORMATS.extend((fp, fa))
+    return _GEO_FORMATS
+
+
+class _RangeDraw:
+    """Drop-in for a GPUBatch inside a slot entry: draws one material's index range of a shared batch."""
+    __slots__ = ('batch', 'start', 'count', '_geometry', '_instanced')
+
+    def __init__(self, batch, start, count, geometry=None):
+        self.batch = batch; self.start = start; self.count = count
+        self._geometry = geometry; self._instanced = None
+
+    def draw(self, shader):
+        self.batch.draw_range(shader, elem_start=self.start, elem_count=self.count)
+
+    def instanced_batch(self):
+        if self._instanced is None:
+            vbo, vbo2, indices = self._geometry
+            if self.start == 0 and self.count == indices.size:
+                self._instanced = self.batch
+            else:
+                ibo = gpu.types.GPUIndexBuf(type='TRIS',
+                    seq=indices.reshape(-1)[self.start:self.start+self.count].reshape(-1, 3))
+                self._instanced = gpu.types.GPUBatch(type='TRIS', buf=vbo, elem=ibo)
+                self._instanced.vertbuf_add(vbo2)
+        return self._instanced
+
+
+def _slot_material(obj, eval_obj, k):
+    """Resolve a face's material slot; an empty slot has no material."""
+    try:
+        ms = obj.material_slots
+        if 0 <= k < len(ms):
+            return ms[k].material
+    except Exception:
+        pass
+    return None
+
+
+def _material_state(obj):
+    """Material names and baked fallback colours that affect geometry buffers."""
+    return tuple((slot.material.name, tuple(slot.material.diffuse_color))
+                 if slot.material is not None else None for slot in obj.material_slots)
+
+
+def _geo_share_key(obj, eval_obj, mesh, view_attr):
+    """Linked duplicates share ONE evaluated mesh (same pointer) -> identical geometry, no hashing.
+    Materials are part of the key because meshes without vertex colours carry the slot material's
+    colour in their colour buffer. The share cache is dropped on every depsgraph change."""
+    if mesh is None:
+        return None
+    try:
+        mats = tuple((s.material.name if s.material else '') for s in obj.material_slots)
+        am = getattr(getattr(eval_obj, 'active_material', None), 'name', '')
+        return (mesh.as_pointer(), mats, am, view_attr or '')
+    except Exception:
+        return None
+
+
+def _dup_candidate_key(obj, mesh, view_attr):
+    """Cheap grouping key for objects WITH modifiers: linked duplicates with modifiers each get their
+    own evaluated mesh (different pointer), so only objects sharing this key can possibly be identical.
+    Only groups with more than one member pay for the full content hash (_share_sig)."""
+    try:
+        mods = tuple((m.type, bool(m.show_viewport)) for m in obj.modifiers)
+        mats = tuple((s.material.name if s.material else '') for s in obj.material_slots)
+        base = getattr(getattr(obj, 'data', None), 'name', '')
+        return (base, mods, len(mesh.vertices), len(mesh.polygons), mats, view_attr or '')
+    except Exception:
+        return None
+
+
+def _cheap_sig(obj, mesh):
+    """(mesh name, vert count, poly count, modifier state, None): what the re-entry pre-check reads.
+    Edits are tracked by view_update / _EDITED_WHILE_AWAY, so a cold load needs no buffer hash."""
+    try:
+        mods = tuple((m.type, bool(m.show_viewport)) for m in obj.modifiers)
+        base = getattr(getattr(obj, 'data', None), 'name', '')
+        return (base, len(mesh.vertices), len(mesh.polygons), mods, None)
+    except Exception:
+        return None
+
+
+def _extract_geometry(obj, depsgraph, mesh=None, attr_name=""):
+    """Read the evaluated mesh and upload it ONCE. Returns a cache dict whose 'slots_list' holds one
+    [drawable, material_name, texture] entry per material (texture filled later by streaming), or
+    None. Falls back to the legacy per-slot path on Blender builds without draw_range/vertbuf_add."""
+    if not _GEO_FAST_OK:
+        data = _extract_mesh_data(obj, depsgraph, mesh=mesh, attr_name=attr_name)
+        if data:
+            data['slots_list'] = [list(t) for t in _build_object_slots(data)]
+        return data
+    try:
+        eval_obj = obj.evaluated_get(depsgraph)
+        if mesh is None:
+            mesh = getattr(eval_obj, 'data', None)
+        if mesh is None or not hasattr(mesh, 'loop_triangles'):
+            return None
+        _tp = time.perf_counter() if _EXTRACT_PROF is not None else 0.0
+        mesh.calc_loop_triangles()
+        n_tris = len(mesh.loop_triangles)
+        if n_tris == 0:
+            return None
+        n_verts = len(mesh.vertices); n_loops = len(mesh.loops); n_polys = len(mesh.polygons)
+        _tp = _prof('calc_loop_triangles', _tp)
+        if _EXTRACT_PROF is not None:
+            _EXTRACT_PROF['n_tris'] = _EXTRACT_PROF.get('n_tris', 0) + n_tris
+            _EXTRACT_PROF['n_loops'] = _EXTRACT_PROF.get('n_loops', 0) + n_loops
+
+        li = _raw_corner_tris(mesh, n_tris)
+        cv = _raw_attr(mesh, '.corner_vert', _ct.c_int, 1, n_loops)
+        if li is None or cv is None:
+            li = np.empty(n_tris * 3, dtype=np.int32); mesh.loop_triangles.foreach_get('loops', li)
+            cv = np.empty(n_loops, dtype=np.int32); mesh.loops.foreach_get('vertex_index', cv)
+        cv = np.asarray(cv)
+        vc = _raw_attr(mesh, 'position', _ct.c_float, 3, n_verts)
+        if vc is None:
+            vc = np.empty(n_verts * 3, dtype=np.float32); mesh.vertices.foreach_get('co', vc)
+            vc = vc.reshape(n_verts, 3)
+
+        # Per-triangle material index (same derivation as _extract_mesh_data).
+        pmi_arr = lt_arr = None
+        tri_mi = None
+        if n_polys and 'material_index' in mesh.attributes:
+            try:
+                pmi = _raw_attr(mesh, 'material_index', _ct.c_int, 1, n_polys)
+                if pmi is None:
+                    pmi = np.empty(n_polys, dtype=np.int32)
+                    mesh.attributes['material_index'].data.foreach_get('value', pmi)
+                lt = np.empty(n_polys, dtype=np.int32); mesh.polygons.foreach_get('loop_total', lt)
+                pmi_arr = np.asarray(pmi).astype(np.int32, copy=False); lt_arr = lt
+                tri_mi = np.repeat(pmi_arr, lt_arr - 2)
+                if len(tri_mi) != n_tris:
+                    tri_mi = None
+            except Exception:
+                tri_mi = None
+            if tri_mi is None:
+                tri_mi = np.zeros(n_tris, dtype=np.int32)
+                try: mesh.loop_triangles.foreach_get('material_index', tri_mi)
+                except Exception: pass
+        else:
+            # An absent material_index attribute means every face uses slot 0.
+            tri_mi = None
+
+        _tp = _prof('read', _tp)
+        # Triangles grouped by material (original order within a material, as the slices were).
+        tris = np.asarray(li).reshape(n_tris, 3)
+        if tri_mi is None:
+            uniq, counts = (0,), (n_tris,)
+        else:
+            uniq, counts = np.unique(tri_mi, return_counts=True)
+        if len(uniq) > 1:
+            tris = tris[np.argsort(tri_mi, kind='stable')]
+        idx = np.ascontiguousarray(tris, dtype=np.uint32)        # copy: never alias Blender memory
+        _tp = _prof('sort', _tp)
+        pos = np.ascontiguousarray(vc[cv], dtype=np.float32)     # per-corner positions
+        _tp = _prof('pos_gather', _tp)
+
+        # Per-corner normals (split/custom honoured); vertex normals only as a fallback.
+        try:
+            nrm = np.empty(n_loops * 3, dtype=np.float32)
+            mesh.corner_normals.foreach_get('vector', nrm)
+            nrm = nrm.reshape(n_loops, 3)
+        except Exception:
+            vn = np.empty(n_verts * 3, dtype=np.float32); mesh.vertices.foreach_get('normal', vn)
+            nrm = vn.reshape(n_verts, 3)[cv]
+        _tp = _prof('normals', _tp)
+
+        uv_layer = mesh.uv_layers.active
+        if uv_layer:
+            uv = _raw_attr(mesh, uv_layer.name, _ct.c_float, 2, n_loops)
+            if uv is None:
+                uv = np.empty(n_loops * 2, dtype=np.float32); uv_layer.data.foreach_get('uv', uv)
+                uv = uv.reshape(n_loops, 2)
+            uv = np.ascontiguousarray(uv, dtype=np.float32)
+        else:
+            uv = np.zeros((n_loops, 2), dtype=np.float32)
+
+        _tp = _prof('uv', _tp)
+        # Vertex colours: preserve valid attributes, including constant colours.
+        col = None; has_vcol = False
+        try:
+            ca = mesh.color_attributes
+            attr = None
+            if ca:
+                if attr_name:
+                    try: attr = ca.get(attr_name)
+                    except Exception: attr = None
+                if attr is None:
+                    try: attr = ca.active_color
+                    except Exception: attr = None
+                if attr is None and len(ca): attr = ca[0]
+            if attr is not None and getattr(attr, 'data_type', '') in ('FLOAT_COLOR', 'BYTE_COLOR'):
+                m = len(attr.data)
+                carr = np.empty(m * 4, dtype=np.float32)
+                attr.data.foreach_get('color', carr)
+                carr = carr.reshape(m, 4)
+                if attr.domain == 'CORNER':
+                    col = carr
+                elif attr.domain == 'POINT':
+                    col = carr[cv]
+                if col is not None:
+                    has_vcol = col.shape[0] == n_loops
+        except Exception:
+            col = None; has_vcol = False
+        ranges = []; names = []; rgba = []; s = 0
+        for k, c in zip(uniq, counts):
+            k = int(k); st = s * 3; cnt = int(c) * 3; s += int(c)
+            m = _slot_material(obj, eval_obj, k)
+            dc = m.diffuse_color if m is not None else (1.0, 1.0, 1.0, 1.0)
+            ranges.append((k, st, cnt)); names.append(m.name if m is not None else None)
+            rgba.append((dc[0], dc[1], dc[2], 1.0))
+        if not has_vcol:
+            # Flat slot colour per corner (what _extract_mesh_data tiles per slot). Corners are stored
+            # face by face, so the per-corner material index is ONE np.repeat -> a small palette gather,
+            # instead of scattering through three indices per triangle.
+            if len(ranges) == 1:
+                col = np.empty((n_loops, 4), dtype=np.float32); col[:] = rgba[0]
+            else:
+                loop_mi = None
+                if pmi_arr is not None and lt_arr is not None and int(uniq.min()) >= 0:
+                    try:
+                        loop_mi = np.repeat(pmi_arr, lt_arr)
+                        if len(loop_mi) != n_loops:
+                            loop_mi = None
+                    except Exception:
+                        loop_mi = None
+                if loop_mi is not None:
+                    pal = np.ones((int(uniq.max()) + 1, 4), dtype=np.float32)
+                    for (k, _st, _cnt), c4 in zip(ranges, rgba):
+                        pal[k] = c4
+                    col = pal[loop_mi]
+                else:
+                    col = np.ones((n_loops, 4), dtype=np.float32)
+                    flat = idx.reshape(-1)
+                    for (k, st, cnt), c4 in zip(ranges, rgba):
+                        col[flat[st:st + cnt]] = c4
+
+        _tp = _prof('colors', _tp)
+        fp, fa = _geo_formats()
+        vbo = gpu.types.GPUVertBuf(fp, n_loops)
+        vbo.attr_fill(id='position', data=pos)
+        vbo2 = gpu.types.GPUVertBuf(fa, n_loops)
+        vbo2.attr_fill(id='normal', data=np.ascontiguousarray(nrm, dtype=np.float32))
+        vbo2.attr_fill(id='vertColor', data=np.ascontiguousarray(col, dtype=np.float32))
+        vbo2.attr_fill(id='texCoord', data=uv)
+        ibo = gpu.types.GPUIndexBuf(type='TRIS', seq=idx)
+        batch = gpu.types.GPUBatch(type='TRIS', buf=vbo, elem=ibo)
+        batch.vertbuf_add(vbo2)
+        slots_list = [[_RangeDraw(batch, st, cnt, (vbo, vbo2, idx)), nm, None] for (k, st, cnt), nm in zip(ranges, names)]
+
+        _tp = _prof('gpu_build', _tp)
+        vt = np.ascontiguousarray(np.asarray(vc).T)
+        vmin = vt.min(axis=1); vmax = vt.max(axis=1); size = vmax - vmin
+        gen_min = (float(vmin[0]), float(vmin[1]), float(vmin[2]))
+        gen_scale = (1.0/float(size[0]) if size[0] > 1e-9 else 0.0,
+                     1.0/float(size[1]) if size[1] > 1e-9 else 0.0,
+                     1.0/float(size[2]) if size[2] > 1e-9 else 0.0)
+        _tp = _prof('bbox', _tp)
+        data = dict(material_state=_material_state(obj), slots_list=slots_list, ranges=ranges, pos=pos, idx=idx, batch=batch,
+                    vbo=vbo, vbo2=vbo2, ibo=ibo, n_loops=n_loops, n_tris=n_tris,
+                    gen_min=gen_min, gen_scale=gen_scale)
+        if _KEEP_CPU_ARRAYS:
+            data.update(nrm=np.array(nrm, dtype=np.float32), uv=np.array(uv, dtype=np.float32),
+                        col=np.array(col, dtype=np.float32))
+        return data
+    except Exception as e:
+        print(f"[VertexLit] geometry extract error ({obj.name}): {e}")
+        return None
+
+# ── Shadow map ────────────────────────────────────────────────────────────────
+
+class _ShadowMap:
+    def __init__(self, size):
+        self.size=0; self.tex=None; self.fb=None; self.resize(size)
+    def resize(self, size):
+        if self.size==size: return
+        self.size=size
+        self.tex=gpu.types.GPUTexture((size,size),format='DEPTH_COMPONENT32F')
+        try: self.fb=gpu.types.GPUFrameBuffer(depth_slot=self.tex)
+        except Exception:
+            d=gpu.types.GPUTexture((size,size),format='RGBA8')
+            self.fb=gpu.types.GPUFrameBuffer(color_slots=[d],depth_slot=self.tex)
+
+# ── Scene helpers ─────────────────────────────────────────────────────────────
+
+def _collect_lights(depsgraph, energy_scale):
+    lights=[]; ltype={'POINT':0,'SUN':1,'SPOT':0,'AREA':0}
+    for inst in depsgraph.object_instances:
+        obj=inst.object
+        if obj.type!='LIGHT': continue
+        ld=obj.data; mat=inst.matrix_world
+        if ld.type=='SUN':
+            energy=ld.energy*energy_scale*10.0; radius=1.0
+        else:
+            energy=ld.energy*energy_scale
+            radius=float(ld.cutoff_distance) if getattr(ld,'use_custom_distance',False) else 20.0
+        lights.append({
+            'pos': tuple(mat.to_translation()),
+            'dir': tuple(mat.to_3x3()@Vector((0,0,-1))),
+            'color': (float(ld.color.r),float(ld.color.g),float(ld.color.b)),
+            'energy': energy, 'type': ltype.get(ld.type,0),
+            'radius': radius, 'is_sun': ld.type=='SUN',
+            'matrix_world': mat.copy(),
+        })
+        if len(lights)>=MAX_LIGHTS: break
+    return lights
+
+def _scene_bounds(depsgraph):
+    # Transform local AABBs in bulk: center' = M*center, extent' = abs(M)*extent.
+    # The former eight-corner Python loop cost ~90 ms for 4096 objects per rebuild.
+    matrices=[]; centers=[]; extents=[]; local_bounds={}
+    for inst in depsgraph.object_instances:
+        obj=inst.object
+        if obj.type!='MESH':continue
+        key=obj.data.as_pointer()
+        bounds=local_bounds.get(key)
+        if bounds is None:
+            bb=obj.bound_box
+            lo=bb[0]; hi=bb[6]
+            bounds=local_bounds[key]=(tuple((lo[i]+hi[i])*.5 for i in range(3)),
+                                      tuple((hi[i]-lo[i])*.5 for i in range(3)))
+        m=inst.matrix_world
+        matrices.append(tuple(m[0])+tuple(m[1])+tuple(m[2]))
+        centers.append(bounds[0]);extents.append(bounds[1])
+    if not matrices:return Vector((0,0,0)),10.0
+    m=np.asarray(matrices,dtype=np.float64).reshape(-1,3,4)
+    c=np.einsum('nij,nj->ni',m[:,:,:3],np.asarray(centers))+m[:,:,3]
+    e=np.einsum('nij,nj->ni',np.abs(m[:,:,:3]),np.asarray(extents))
+    lo=np.min(c-e,axis=0);hi=np.max(c+e,axis=0)
+    return Vector((lo+hi)*.5),max(Vector(hi-lo).length*.5,1.0)
+
+
+def _build_light_space(light,center,radius):
+    mat=light['matrix_world']; ldir=(mat.to_3x3()@Vector((0,0,-1))).normalized()
+    eye=center-ldir*radius*2.5; fwd=(center-eye).normalized()
+    up=Vector((0,1,0))
+    if abs(fwd.dot(up))>.99: up=Vector((1,0,0))
+    r_v=fwd.cross(up).normalized(); u_v=r_v.cross(fwd)
+    view=Matrix([[r_v.x,r_v.y,r_v.z,-r_v.dot(eye)],
+                 [u_v.x,u_v.y,u_v.z,-u_v.dot(eye)],
+                 [-fwd.x,-fwd.y,-fwd.z,fwd.dot(eye)],[0,0,0,1]])
+    s=radius*1.6; n=0.1; f=radius*6.0
+    ortho=Matrix([[1/s,0,0,0],[0,1/s,0,0],[0,0,-2/(f-n),-(f+n)/(f-n)],[0,0,0,1]])
+    return ortho@view
+
+
+def _build_light_space_dir(sun_dir, center, radius):
+    """Ortho light-space matrix for the objectless directional sun. sun_dir is the direction
+    TO the sun; the light shines along -sun_dir, covering the scene bounds."""
+    ldir = -Vector(sun_dir)
+    if ldir.length < 1e-6:
+        ldir = Vector((0.0, 0.0, -1.0))
+    ldir = ldir.normalized()
+    eye = center - ldir * radius * 2.5
+    fwd = (center - eye).normalized()
+    up = Vector((0, 1, 0))
+    if abs(fwd.dot(up)) > .99:
+        up = Vector((1, 0, 0))
+    r_v = fwd.cross(up).normalized(); u_v = r_v.cross(fwd)
+    view = Matrix([[r_v.x, r_v.y, r_v.z, -r_v.dot(eye)],
+                   [u_v.x, u_v.y, u_v.z, -u_v.dot(eye)],
+                   [-fwd.x, -fwd.y, -fwd.z, fwd.dot(eye)], [0, 0, 0, 1]])
+    s = radius * 1.6; n = 0.1; f = radius * 6.0
+    ortho = Matrix([[1/s, 0, 0, 0], [0, 1/s, 0, 0],
+                    [0, 0, -2/(f-n), -(f+n)/(f-n)], [0, 0, 0, 1]])
+    return ortho @ view
+
+
+def _build_light_space_fit(sun_dir, view_proj, cam_pos, shadow_distance, res, scene_radius):
+    """Fit the sun's shadow ortho tightly to the CAMERA view frustum (clamped to
+    shadow_distance), instead of the whole scene — so texels are small and shadows are
+    sharp. Uses the frustum's bounding sphere (rotation-stable) with texel snapping (no
+    shimmer) and extends the near plane toward the sun so off-frustum casters still cast.
+    Returns (light_space_matrix, texel_world_size)."""
+    inv = view_proj.inverted()
+    ndc = [(-1,-1,-1),(1,-1,-1),(1,1,-1),(-1,1,-1),(-1,-1,1),(1,-1,1),(1,1,1),(-1,1,1)]
+    corners = []
+    for c in ndc:
+        p = inv @ Vector((c[0], c[1], c[2], 1.0))
+        w = p.w if abs(p.w) > 1e-9 else 1.0
+        corners.append(Vector((p.x/w, p.y/w, p.z/w)))
+    # Clamp the far corners to shadow_distance from the camera (limits the shadowed range).
+    cam = Vector(cam_pos)
+    for i in range(4):
+        ray = corners[i+4] - cam
+        L = ray.length
+        if L > shadow_distance and L > 1e-6:
+            corners[i+4] = cam + ray * (shadow_distance / L)
+
+    center = Vector((0.0, 0.0, 0.0))
+    for c in corners: center += c
+    center /= 8.0
+    radius = 0.01
+    for c in corners: radius = max(radius, (c - center).length)
+
+    ldir = -Vector(sun_dir)
+    if ldir.length < 1e-6: ldir = Vector((0.0, 0.0, -1.0))
+    fwd = ldir.normalized()
+    up = Vector((0, 1, 0))
+    if abs(fwd.dot(up)) > 0.99: up = Vector((1, 0, 0))
+    r_v = fwd.cross(up).normalized(); u_v = r_v.cross(fwd)
+
+    # Texel-snap the sphere centre in light space so the map doesn't swim frame-to-frame.
+    texel = (2.0 * radius) / max(res, 1)
+    cx = round(r_v.dot(center) / texel) * texel
+    cy = round(u_v.dot(center) / texel) * texel
+    cz = fwd.dot(center)
+    center = r_v * cx + u_v * cy + fwd * cz
+
+    margin = max(scene_radius, radius)   # include casters behind the visible region
+    eye = center - fwd * (radius + margin)
+    view = Matrix([[r_v.x, r_v.y, r_v.z, -r_v.dot(eye)],
+                   [u_v.x, u_v.y, u_v.z, -u_v.dot(eye)],
+                   [-fwd.x, -fwd.y, -fwd.z, fwd.dot(eye)], [0, 0, 0, 1]])
+    s = radius; n = 0.0; f = 2.0 * radius + margin
+    ortho = Matrix([[1/s, 0, 0, 0], [0, 1/s, 0, 0],
+                    [0, 0, -2/(f-n), -(f+n)/(f-n)], [0, 0, 0, 1]])
+    return ortho @ view, texel
+
+# ── Mesh extraction (one new_from_object call per object, everything derived from it) ──
+
+def _extract_mesh_data(obj, depsgraph, mesh=None, attr_name=""):
+    """
+    Read the depsgraph-evaluated mesh DIRECTLY (no new_from_object copy, no
+    create/remove -> no depsgraph churn -> no self-triggered rebuild loop, and far
+    faster on large scenes). All reads are bulk foreach_get / raw memory + numpy (no Python loops).
+    `mesh` overrides the geometry source (used for the edit-mode BMesh->temp-mesh path).
+
+    Fast path (measured ~2.9x faster on the Azola vegetation scene; output bit-identical to the previous
+    implementation -- enforced by tests/test_extract_identical.py):
+      * per-triangle material index = the FACE 'material_index' repeated (loop_total - 2) times per face
+        (loop_triangles.foreach_get('material_index') cost ~90 ms per 590k triangles)
+      * multi-material split: order triangles by material ONCE, gather once, slice contiguous ranges
+        (was four boolean-mask copies per material)
+      * vertex normals are read only if corner normals are unavailable (GI, their other user, is gone)
+      * bbox min/max via a transposed contiguous copy (axis-0 reduction of an (N,3) array is slow)
+      * vertex colours are read only when a colour attribute actually exists
+    """
+    try:
+        eval_obj = obj.evaluated_get(depsgraph)
+        if mesh is None:
+            mesh = getattr(eval_obj, 'data', None)
+        if mesh is None or not hasattr(mesh, 'loop_triangles'):
+            return None
+        mesh.calc_loop_triangles()
+        n_tris = len(mesh.loop_triangles)
+        if n_tris == 0:
+            return None
+
+        n_verts = len(mesh.vertices)
+        n_loops = len(mesh.loops)
+        n_polys = len(mesh.polygons)
+        n_flat = n_tris * 3
+
+        # --- Triangle corner/vertex indices: raw memory (fast) with foreach fallback ---
+        li_flat = _raw_corner_tris(mesh, n_tris)          # tri -> corner indices
+        corner_vert = _raw_attr(mesh, '.corner_vert', _ct.c_int, 1, n_loops)
+        if li_flat is not None and corner_vert is not None:
+            vi_flat = corner_vert[li_flat]                # vertex per corner
+        else:
+            li_flat = np.empty(n_flat, dtype=np.int32); mesh.loop_triangles.foreach_get('loops', li_flat)
+            vi_flat = np.empty(n_flat, dtype=np.int32); mesh.loop_triangles.foreach_get('vertices', vi_flat)
+
+        # --- Vertex positions: raw with fallback ---
+        vc = _raw_attr(mesh, 'position', _ct.c_float, 3, n_verts)
+        if vc is None:
+            vc = np.empty(n_verts * 3, dtype=np.float32); mesh.vertices.foreach_get('co', vc)
+            vc = vc.reshape(n_verts, 3)
+
+        # --- Per-triangle material index from the FACE attribute ---
+        # Triangles are laid out face by face, (loop_total - 2) per face, so repeating each face's
+        # index gives the per-triangle index. (loop_triangles.foreach_get('material_index') was the
+        # single most expensive read: ~90 ms per 590k triangles.)
+        tri_mi = None
+        if n_polys and 'material_index' in mesh.attributes:
+            try:
+                pmi = _raw_attr(mesh, 'material_index', _ct.c_int, 1, n_polys)
+                if pmi is None:
+                    pmi = np.empty(n_polys, dtype=np.int32)
+                    mesh.attributes['material_index'].data.foreach_get('value', pmi)
+                lt = np.empty(n_polys, dtype=np.int32); mesh.polygons.foreach_get('loop_total', lt)
+                tri_mi = np.repeat(pmi.astype(np.int32, copy=False), lt - 2)
+                if len(tri_mi) != n_tris:
+                    tri_mi = None
+            except Exception:
+                tri_mi = None
+            if tri_mi is None:                            # layout surprise -> the old (slow, exact) read
+                tri_mi = np.zeros(n_tris, dtype=np.int32)
+                try: mesh.loop_triangles.foreach_get('material_index', tri_mi)
+                except Exception: pass
+        else:
+            tri_mi = np.zeros(n_tris, dtype=np.int32)
+        uniq = np.unique(tri_mi)
+
+        # --- Multi-material: order triangles by material ONCE, then every gather below comes out
+        #     grouped by material and each slot is a contiguous slice (no per-material mask copies).
+        #     Order within a material is the original triangle order, exactly as the masks gave.
+        if len(uniq) > 1:
+            parts = [np.flatnonzero(tri_mi == k) for k in uniq]
+            counts = [len(p) * 3 for p in parts]
+            order = np.concatenate(parts)
+            corner = (order[:, None] * 3 + np.arange(3, dtype=order.dtype)).ravel()
+            li_s = li_flat[corner]; vi_s = vi_flat[corner]
+        else:
+            counts = [n_flat]; li_s = li_flat; vi_s = vi_flat
+        positions = vc[vi_s]
+
+        # Per-CORNER normals for the draw batch so flat/hard shading, sharp edges and custom split
+        # normals are honoured. Vertex normals are only a fallback now (GI, their other user, is gone).
+        try:
+            cn = np.empty(n_loops * 3, dtype=np.float32)
+            mesh.corner_normals.foreach_get('vector', cn)
+            normals = cn.reshape(n_loops, 3)[li_s]
+        except Exception:
+            vn = np.empty(n_verts * 3, dtype=np.float32); mesh.vertices.foreach_get('normal', vn)
+            normals = vn.reshape(n_verts, 3)[vi_s]
+        vert_co_local = vc.copy()   # stored in cache -> must not alias Blender memory
+
+        # --- UVs: raw from the active UV attribute, with fallback ---
+        uv_layer = mesh.uv_layers.active
+        if uv_layer:
+            uv = _raw_attr(mesh, uv_layer.name, _ct.c_float, 2, n_loops)
+            if uv is None:
+                uv = np.empty(n_loops * 2, dtype=np.float32); uv_layer.data.foreach_get('uv', uv)
+                uv = uv.reshape(n_loops, 2)
+            uvs = uv[li_s]
+        else:
+            uvs = np.zeros((n_flat, 2), dtype=np.float32)
+
+        # Vertex colours: bulk foreach_get + numpy gather. Without an attribute,
+        # slots use their material's flat display colour.
+        colors = None; has_vcol = False
+        try:
+            ca = mesh.color_attributes
+            attr = None
+            if ca:
+                if attr_name:
+                    try: attr = ca.get(attr_name)
+                    except Exception: attr = None
+                if attr is None:
+                    try: attr = ca.active_color
+                    except Exception: attr = None
+                if attr is None and len(ca): attr = ca[0]
+            if attr is not None and getattr(attr, 'data_type', '') in ('FLOAT_COLOR', 'BYTE_COLOR'):
+                m = len(attr.data)
+                carr = np.empty(m * 4, dtype=np.float32)
+                attr.data.foreach_get('color', carr)
+                carr = carr.reshape(m, 4)
+                if attr.domain == 'CORNER':
+                    colors = carr[li_s]
+                elif attr.domain == 'POINT':
+                    colors = carr[vi_s]
+                if colors is not None:
+                    has_vcol = colors.shape[0] == n_flat
+        except Exception:
+            colors = None; has_vcol = False
+
+        # Generated-coord bbox (local) — cached so the draw loop needn't recompute per frame.
+        # min/max over axis 0 of an (N,3) array is slow; a transposed contiguous copy gives the exact
+        # same values as fast per-row reductions.
+        vt = np.ascontiguousarray(vc.T)
+        vmin = vt.min(axis=1); vmax = vt.max(axis=1); size = vmax - vmin
+        gen_min = (float(vmin[0]), float(vmin[1]), float(vmin[2]))
+        gen_scale = (1.0/float(size[0]) if size[0] > 1e-9 else 0.0,
+                     1.0/float(size[1]) if size[1] > 1e-9 else 0.0,
+                     1.0/float(size[2]) if size[2] > 1e-9 else 0.0)
+
+        def _slot(slot_idx, P, N, U, C_arr):
+            slot_mat = _slot_material(obj, eval_obj, slot_idx)
+            stex = _get_gpu_tex(_find_base_texture(slot_mat))
+            sdefault = [1.0, 1.0, 1.0, 1.0]
+            if slot_mat is not None:
+                dc = slot_mat.diffuse_color; sdefault = [dc[0], dc[1], dc[2], 1.0]
+            scolors = C_arr if has_vcol else np.tile(np.array(sdefault, dtype=np.float32), (len(P), 1))
+            return dict(positions=P, normals=N, uvs=U, colors=scolors,
+                        material_name=(slot_mat.name if slot_mat else None), texture=stex)
+
+        # One slot per material: contiguous slices of the material-ordered arrays (the single-material
+        # common case is one slice covering everything -> no copies at all).
+        slots_out = []
+        s0 = 0
+        for idx, cnt in zip(uniq, counts):
+            s1 = s0 + cnt
+            slots_out.append(_slot(int(idx), positions[s0:s1], normals[s0:s1], uvs[s0:s1],
+                                   colors[s0:s1] if (has_vcol and colors is not None) else None))
+            s0 = s1
+        return dict(
+            material_state=_material_state(obj),
+            slots=slots_out, gen_min=gen_min, gen_scale=gen_scale,
+            vi_map=vi_flat, n_verts=n_verts,
+            vert_co_local=vert_co_local,
+        )
+    except Exception as e:
+        print(f"[VertexLit] extract error ({obj.name}): {e}")
+        return None
+
+
+def _build_slot_batch(slot):
+    shader=_get_main_shader()
+    return batch_for_shader(shader,'TRIS',{
+        'position':    slot['positions'],
+        'normal':      slot['normals'],
+        'vertColor':   slot['colors'],
+        'texCoord':    slot['uvs'],
+    })
+
+
+def _build_object_slots(cached):
+    """Return a list of (batch, material_name, texture) — one per material slot."""
+    out=[]
+    for slot in cached.get('slots', []):
+        try:
+            out.append((_build_slot_batch(slot), slot.get('material_name'), slot.get('texture')))
+        except Exception as e:
+            print("[VertexLit] slot batch error:", e)
+    return out
+
+
+def _build_shadow_batch_from_cache(cached):
+    """Build shadow batch from already-extracted vertex data — no extra new_from_object."""
+    if 'vbo' in cached and 'ibo' in cached:
+        # The main geometry already has a separate position VBO. Reuse it and
+        # its index buffer instead of uploading a second full geometry copy.
+        return gpu.types.GPUBatch(type='TRIS', buf=cached['vbo'], elem=cached['ibo'])
+    shader=_get_shadow_shader()
+    if 'vi_map' not in cached and 'idx' in cached:
+        # v0.16.5 geometry-first cache: per-corner positions + the (material-sorted) triangle indices.
+        return batch_for_shader(shader, 'TRIS', {'position': cached['pos']}, indices=cached['idx'])
+    positions=cached['vert_co_local']
+    vi_map=cached['vi_map']
+    indices=np.asarray(vi_map, dtype=np.int32).reshape(-1, 3)   # numpy, not a python loop
+    return batch_for_shader(shader,'TRIS',{'position':positions},indices=indices)
+
+
+# ── Render Engine ─────────────────────────────────────────────────────────────
+
+class VertexLitEngine(bpy.types.RenderEngine):
+    bl_idname='VERTEX_LIT'; bl_label='Workbench 2.0'; bl_use_preview=False
+    # F12 render() draws with the gpu module -> Blender must hand render() a GPU context.
+    bl_use_gpu_context = True
+    # Use Blender's STANDARD shader nodes (not a custom node system). Without this
+    # (it defaults True), Blender detaches the Shader Editor from materials: it shows
+    # a generic "Shader Nodetree", won't follow the selected object, and edits don't
+    # reach the real material — so live-node changes appear to do nothing.
+    bl_use_shading_nodes_custom = False
+
+    def _ensure_state(self):
+        if getattr(self,'_state_ready',False): return
+        self._dirty            = True
+        # Reuse the persistent caches (data + batches) across engine instances so
+        # re-entering rendered view does NO work for unchanged objects.
+        # Own the mappings: another viewport/view layer must not evict our visible
+        # objects. Immutable extraction data and GPU batches are still shared.
+        self._mesh_cache       = _PERSIST_MESH.copy()
+        self._batch_dict       = _PERSIST_BATCH.copy()
+        self._shadow_dict      = _PERSIST_SHADOW.copy()
+        self._sig_cache        = _PERSIST_SIG.copy()
+        self._needs_verify     = True    # on (re)entry, sig-check cached objects once
+        self._dummy_depth      = None
+        self._white_tex        = None
+        self._lights_cache     = []
+        self._bounds_cache     = (Vector((0,0,0)),10.0)
+        self._shadow_dirty     = True
+        self._shadow_tex_cache = None
+        self._viewport_shadow_map = None
+        self._dirty_objects    = set()   # names of objects to re-extract (incremental)
+        self._force_full       = False   # force a full re-extract next rebuild
+        self._geo_pending      = False   # geometry still streaming in (progressive load)
+        self._edit_tmp         = None    # reused temp mesh for live edit-mode extraction
+        self._post             = fx.make_pipeline()   # screen-space effects (AO...)
+        # After rebuild, skip N view_update cycles. new_from_object / remove
+        # queue deferred depsgraph events that arrive after _rebuild returns.
+        # The drain absorbs them so they don't re-trigger a rebuild.
+        self._drain_cycles     = 0
+        self._rebuild_time     = 0.0
+        self._state_ready      = True
+        self._material_states = {}
+        self._scene_records_dirty = True
+        self._scene_records = []
+
+    def _ensure_resources(self):
+        if self._dummy_depth is None:
+            self._dummy_depth=gpu.types.GPUTexture((1,1),format='DEPTH_COMPONENT32F')
+        if self._white_tex is None:
+            self._white_tex=gpu.types.GPUTexture((1,1),format='RGBA8')
+
+    def update(self, data=None, depsgraph=None):
+        pass
+
+    def render(self, depsgraph):
+        # F12 final image: render the scene from the active camera into an offscreen
+        # and hand the pixels to Blender, including the viewport's sun shadows.
+        result = None
+        self._final_render = True
+        try:
+            scene = depsgraph.scene
+            sc = scene.render.resolution_percentage / 100.0
+            w = max(int(scene.render.resolution_x * sc), 1)
+            h = max(int(scene.render.resolution_y * sc), 1)
+            x0 = y0 = 0
+            x1, y1 = w, h
+            if scene.render.use_border:
+                x0, x1 = int(w * scene.render.border_min_x), int(w * scene.render.border_max_x)
+                y0, y1 = int(h * scene.render.border_min_y), int(h * scene.render.border_max_y)
+            rw, rh = max(x1 - x0, 1), max(y1 - y0, 1)
+            vls = getattr(scene, 'vertex_lit', None)
+            self._cull = 'BACK' if (vls and getattr(vls, 'backface_cull', True)) else 'NONE'
+            cam = scene.camera
+
+            self._ensure_state(); self._ensure_resources()
+            # F12 uses the RENDER depsgraph (Is Viewport = False -> full geometry, not the
+            # viewport's convex-hull preview). Use private render caches so evaluated render
+            # meshes never replace the viewport's geometry when F12 completes.
+            self._mesh_cache = {}; self._batch_dict = {}; self._shadow_dict = {}; self._sig_cache = {}
+            self._force_full = True
+            self._dirty = True
+            self._rebuild(depsgraph, vls)
+            _guard = 0
+            _deadline = time.time() + 120.0   # report failure rather than hang or draw partial geometry
+            while getattr(self, '_geo_pending', False) and _guard < 100000 and time.time() < _deadline:
+                if self.test_break():
+                    return
+                # _force_full already consumed; subsequent passes drain the remaining queue.
+                self._rebuild(depsgraph, vls)
+                _guard += 1
+            if getattr(self, '_geo_pending', False):
+                raise RuntimeError('Geometry extraction did not finish; refusing an incomplete render')
+            if self.test_break():
+                return
+            self._stream_textures(None)     # F12: every queued texture before drawing
+
+            result = self.begin_result(0, 0, rw, rh)
+            rl = result.layers[0].passes["Combined"]
+
+            if cam is None or cam.type != 'CAMERA':
+                rl.rect = [[0.0, 0.0, 0.0, 1.0]] * (rw * rh)
+                self.end_result(result)
+                result = None
+                return
+
+            # Use the DEPSGRAPH-EVALUATED camera so animation (and any constraints/drivers)
+            # are applied at the frame being rendered — otherwise we'd read the original
+            # object's stale transform and the view looks wrong / zoomed.
+            cam_eval = cam.evaluated_get(depsgraph)
+            view = cam_eval.matrix_world.inverted()
+            proj = cam_eval.calc_matrix_camera(depsgraph, x=w, y=h,
+                scale_x=scene.render.pixel_aspect_x, scale_y=scene.render.pixel_aspect_y)
+            view_proj = proj @ view
+            self._film_transparent = getattr(scene.render, 'film_transparent', False)
+            self._sun = _compute_sun(vls)
+            try: self._cam_pos = tuple(cam_eval.matrix_world.translation)
+            except Exception: self._cam_pos = (0.0, 0.0, 0.0)
+            try: self._view_mat3 = view.to_3x3()
+            except Exception: self._view_mat3 = None
+            try:
+                kv = Vector((0.25, 0.35, 0.90)); kv.normalize()
+                key_dir = tuple(cam_eval.matrix_world.to_quaternion() @ kv)
+            except Exception:
+                key_dir = (0.3, 0.4, 0.86)
+            studio = (key_dir, (1.0, 1.0, 1.0), (vls.key_intensity if vls else 0.8))
+            sky = tuple(vls.sky_color) if vls else (0.6, 0.68, 0.78)
+            ground = tuple(vls.ground_color) if vls else (0.2, 0.18, 0.16)
+
+            # F12 has its own evaluated camera and geometry: always generate a fresh
+            # shadow map with the same frustum fit and settings used by view_draw.
+            do_shad = bool(vls and vls.use_shadows) and self._sun[2] > 0.0
+            s_bias = vls.shadow_bias if vls else 0.005
+            s_soft = getattr(vls, 'shadow_softness', 1.5) if vls else 1.5
+            ls_mat = Matrix.Identity(4)
+            shad_tex = self._dummy_depth
+            self._shadow_texel = 0.0
+            if do_shad:
+                s_res = int(vls.shadow_resolution)
+                ls_mat, self._shadow_texel = _build_light_space_fit(
+                    self._sun[0], view_proj, self._cam_pos,
+                    getattr(vls, 'shadow_distance', 25.0), s_res, self._bounds_cache[1])
+                self._shadow_dirty = True
+                # Framebuffers belong to the GPU context that created them. F12
+                # runs in a separate context from the rendered viewport, so its
+                # shadow target must not reuse the module-level viewport target.
+                render_shadow_map = _ShadowMap(s_res)
+                shad_tex = self._shadow_pass(ls_mat, s_res, depsgraph,
+                                             shadow_map=render_shadow_map)
+
+            offscreen = gpu.types.GPUOffScreen(w, h, format='RGBA16F')
+            arr = None
+            try:
+                with offscreen.bind():
+                    gpu.state.viewport_set(0, 0, w, h)
+                    fb = gpu.state.active_framebuffer_get()
+                    wc = scene.world.color if scene.world else None
+                    if getattr(scene.render, 'film_transparent', False):
+                        fb.clear(color=(0.0, 0.0, 0.0, 0.0), depth=1.0)   # transparent film
+                    else:
+                        fb.clear(color=(wc[0], wc[1], wc[2], 1.0) if wc else (0.05, 0.05, 0.05, 1.0),
+                                 depth=1.0)
+                    post = getattr(self, '_post', None)
+                    if post is not None and post.any_enabled(vls):
+                        # Same effect pipeline as the viewport (AO / cavity / outline / FXAA).
+                        view_mat3 = view.to_3x3()
+                        draw_scene, post_ctx = self._make_post_ctx(
+                            depsgraph, vls, view_proj, view_mat3, proj, w, h, wc,
+                            studio, ls_mat, sky, ground, 1.0, self._lights_cache,
+                            do_shad=do_shad, s_bias=s_bias, s_soft=s_soft, shad_tex=shad_tex)
+                        post_ctx['ao_full'] = True      # single shot: no frames to accumulate over
+                        final_tex, sw, sh = post.render(w, h, draw_scene, post_ctx, vls, blit=False)
+                        # Read the pipeline's final texture straight out (it may be at a
+                        # supersampled sw x sh; downscale to w x h below).
+                        tmp_fb = gpu.types.GPUFrameBuffer(color_slots=(final_tex,))
+                        with tmp_fb.bind():
+                            buf = tmp_fb.read_color(0, 0, sw, sh, 4, 0, 'FLOAT')
+                        buf.dimensions = sw * sh * 4
+                        arr = np.array(buf, dtype=np.float32).reshape(sh, sw, 4)
+                        if (sw, sh) != (w, h):
+                            arr = _area_resize(arr, w, h)
+                    else:
+                        self._draw_batches(depsgraph, vls, view_proj, studio, ls_mat,
+                                           sky, ground, 1.0, do_shad, s_bias, s_soft, shad_tex,
+                                           self._lights_cache, 'PIXEL')
+                        buf = fb.read_color(0, 0, w, h, 4, 0, 'FLOAT')
+                        buf.dimensions = w * h * 4
+                        # read_color is bottom-up and Blender's render rect is bottom-up too.
+                        arr = np.array(buf, dtype=np.float32).reshape(h, w, 4)
+            finally:
+                offscreen.free()
+
+            # Blender offsets this result into the border (or crops the final image).
+            # Keep full-frame projection/effects, but submit only the selected pixels.
+            rl.rect = arr[y0:y0+rh, x0:x0+rw].reshape(-1, 4).tolist() if arr is not None else \
+                [[0.0, 0.0, 0.0, 1.0]] * (rw * rh)
+            self.end_result(result)
+            result = None
+        except Exception as e:
+            self.error_set("Workbench 2.0 render failed: " + str(e))
+            print("[VertexLit] render() failed:", e)
+            import traceback; traceback.print_exc()
+        finally:
+            self._final_render = False
+            if result is not None:
+                self.end_result(result, cancel=True)
+
+    def free(self):
+        # Called when the engine instance is destroyed (leaving rendered mode).
+        if getattr(self, '_post', None) is not None:
+            try: self._post.free()
+            except Exception: pass
+            self._post = None
+        if getattr(self, '_edit_tmp', None) is not None:
+            try: bpy.data.meshes.remove(self._edit_tmp)
+            except Exception: pass
+            self._edit_tmp = None
+        # Drop per-instance references (batches/textures) so they can be GC'd.
+        # Do NOT clear the shared shader/program caches here: the viewport GPU
+        # context persists across enter/leave, so those stay valid — clearing them
+        # only forces an expensive full recompile on every re-entry.
+        self._dummy_depth = None
+        self._white_tex = None
+        self._shadow_tex_cache = None
+        self._viewport_shadow_map = None
+        self._batch_dict = {}
+        self._shadow_dict = {}
+        self._mesh_cache = {}
+        self._scene_records = []
+        self._draw_groups = []
+        self._shadow_groups = []
+        self._normal_records = {}; self._record_groups = {}; self._instance_chunks = {}
+        self._pending_transforms = {}; self._instance_sources = set()
+        self._state_ready = False
+
+    # ── view_update ───────────────────────────────────────────────────────
+
+    def view_update(self, context, depsgraph):
+        self._ensure_state()
+        can_transform = (not self._dirty and
+                         (not getattr(self, '_scene_records_dirty', True) or
+                          bool(getattr(self, '_pending_transforms', None))))
+        updates = list(depsgraph.updates)
+        self._scene_records_dirty = True
+        self._stoch_epoch = getattr(self, '_stoch_epoch', 0) + 1   # scene changed: restart splat refinement
+
+        # General rule: react to EVERY change in this depsgraph update, immediately.
+        # (No more churn-era throttling — extraction reads the eval mesh directly and no
+        # longer creates/removes datablocks, so there's nothing to "absorb".)
+        changed = False
+        maybe_vis = False
+        vis_prev = getattr(self, '_vis_set', None) or frozenset()
+        for update in updates:
+            id_data = update.id
+            if isinstance(id_data, bpy.types.Object):
+                if id_data.type == 'MESH':
+                    if update.is_updated_geometry:
+                        # modifier add/remove/toggle, geo-nodes, edit-mode edits, new
+                        # object... all surface here -> re-extract just this object.
+                        self._dirty_objects.add(id_data.name)
+                        self._dirty = True; self._shadow_dirty = True; changed = True
+                    elif update.is_updated_transform:
+                        # moving/rotating: matrix_world is read live in the draw loop, so
+                        # NO re-extract needed; only shadows must re-render.
+                        self._shadow_dirty = True; changed = True
+                    else:
+                        # neither geometry nor transform -> possibly a visibility (hide/unhide)
+                        # or other property change; hide/unhide sets no flag, so re-sync below.
+                        maybe_vis = True
+                    # An update for an object NOT currently in the visible set means it just
+                    # appeared (unhidden / added) — regardless of which flag it carries. Bulk
+                    # "unhide all" fires transform-flagged updates on the newly-visible objects,
+                    # so we must re-sync on that too, not only on the no-flag case.
+                    if id_data.name not in vis_prev:
+                        maybe_vis = True
+                elif id_data.type == 'LIGHT':
+                    self._dirty = True; self._shadow_dirty = True; changed = True
+                elif id_data.type == 'EMPTY':
+                    # Collection instancers are empties; transforms affect their shadows.
+                    maybe_vis = True
+                    self._shadow_dirty = True; changed = True
+            elif isinstance(id_data, (bpy.types.Scene, bpy.types.Collection)):
+                # hide_set/unhide can report only a Scene update, with no Object flags.
+                maybe_vis = True
+            elif isinstance(id_data, bpy.types.Mesh):
+                # mesh datablock geometry (edit mode / linked duplicates write here) ->
+                # mark every cached object sharing this mesh.
+                if update.is_updated_geometry and getattr(id_data, 'users', 0) > 0:
+                    for nm in self._mesh_cache:
+                        ob = bpy.data.objects.get(nm)
+                        if ob is not None and getattr(ob, 'data', None) is id_data:
+                            self._dirty_objects.add(nm)
+                    self._dirty = True; self._shadow_dirty = True; changed = True
+            elif isinstance(id_data, bpy.types.Material):
+                # Live path: only the tiny per-material shader recompiles (peeked at draw
+                # time) — no geometry rebuild.
+                material_shader.mark_dirty(id_data.name); changed = True
+                mat = id_data.original
+                state = (mat.name, tuple(mat.diffuse_color))
+                previous = self._material_states.get(mat.as_pointer())
+                if previous is not None and previous != state:
+                    if previous[0] != mat.name:
+                        material_shader.invalidate(previous[0])
+                    seen = set()
+                    for inst in depsgraph.object_instances:
+                        ob = inst.object
+                        if ob.type != 'MESH' or ob.name in seen: continue
+                        seen.add(ob.name)
+                        if any(slot.material and slot.material.name == mat.name for slot in ob.material_slots):
+                            self._dirty_objects.add(ob.name)
+                            self._sig_cache.pop(_draw_key(inst), None)
+                            self._dirty = True; self._shadow_dirty = True
+                self._material_states[mat.as_pointer()] = state
+            elif isinstance(id_data, bpy.types.Image):
+                _invalidate_tex(id_data.name); changed = True
+
+        # Object deletion doesn't always surface as an update -> sync against the scene.
+        count = len(bpy.data.objects)
+        if not self._dirty and self._mesh_cache and count != getattr(self, '_object_count', -1):
+            # Name membership is linear in this Blender collection: a check for
+            # every object on every drag step was quadratic (200+ ms at 4096).
+            if getattr(self, '_vis_set', frozenset()).difference(bpy.data.objects.keys()):
+                self._dirty = True; changed = True
+        self._object_count = count
+
+        # Visibility (hide/unhide) sets no geometry/transform flag, so it would otherwise
+        # never trigger a rebuild (the classic "toggle view mode to make it refresh" bug).
+        # When an object update carried no geo/transform, re-derive the visible mesh set and
+        # rebuild if it changed -> hide/unhide now updates immediately.
+        if maybe_vis:
+            # Hiding one of several instances can leave the geometry-key set
+            # unchanged, but still changes the complete shadow caster set.
+            self._shadow_dirty = True; changed = True
+        if maybe_vis and not self._dirty:
+            try:
+                vis = frozenset(_draw_key(i) for i in depsgraph.object_instances
+                                if i.object.type == 'MESH' and i.show_self)
+                if vis != getattr(self, '_visible_geometry_keys', None):
+                    self._dirty = True; self._shadow_dirty = True; changed = True
+            except Exception:
+                pass
+
+        if changed:
+            # Linked-duplicate sharing keys on evaluated-mesh POINTERS, which are only trustworthy while
+            # nothing changes -> drop the share cache on any change (it only speeds up a load).
+            self._geo_share = {}; self._geo_dup_ck = set()
+            self.tag_redraw()
+            try: context.region.tag_redraw()
+            except Exception: pass
+
+        if can_transform and not self._dirty and updates and all(
+                isinstance(u.id, bpy.types.Object) and u.id.type == 'MESH' and
+                u.is_updated_transform and not u.is_updated_geometry for u in updates):
+            normal = getattr(self, '_normal_records', {})
+            names = {u.id.name for u in updates}
+            if names.issubset(normal) and not names.intersection(getattr(self, '_instance_sources', ())):
+                matrices = {u.id.name: u.id.matrix_world.copy() for u in updates}
+                if all(normal[n][2].is_negative == m.is_negative for n, m in matrices.items()):
+                    if not hasattr(self, '_pending_transforms'): self._pending_transforms = {}
+                    self._pending_transforms.update(matrices)
+                    return
+        self._pending_transforms = {}
+
+    # ── Rebuild ───────────────────────────────────────────────────────────
+
+    def _rebuild(self, depsgraph, vls):
+        # Progressive extraction can change visible depth without another depsgraph
+        # update. Invalidate screen-space caches when new geometry arrives.
+        self._stoch_epoch = getattr(self, '_stoch_epoch', 0) + 1
+        self._pending_transforms = {}
+        self._scene_records_dirty = True
+        self._rebuild_inner(depsgraph, vls)
+
+    def _rebuild_inner(self, depsgraph, vls):
+        self._view_attr = getattr(vls, 'view_attribute', '') if vls else ''
+        t0=time.time()
+
+        en_scale=vls.energy_scale  if vls else 0.01
+        lights  =_collect_lights(depsgraph,en_scale)
+        self._lights_cache=lights
+        self._bounds_cache=_scene_bounds(depsgraph)
+
+        # Current visible mesh objects. Non-instances key by name; geometry-nodes/dupli
+        # INSTANCES key by their shared mesh datablock (the instancer's own mesh is empty),
+        # extracted eagerly here (inst.object is only valid during this iteration) and drawn
+        # per-instance later. Instance geometry is usually a few unique meshes reused many
+        # times, so eager extraction is cheap; the budget still gates it and we re-iterate
+        # next frame for anything deferred.
+        _SIG_MEMO.clear()        # fresh memo for this pass (ids are only valid per pass)
+        current={}
+        inst_keys=set()
+        _va = getattr(self, '_view_attr', '')
+        _want_shadow_i = bool(vls and getattr(vls, 'use_shadows', False))
+        _inst_budget_end = time.time() + 0.25   # geometry-first extraction is cheap; a short freeze is fine
+        _inst_done = 0
+        self._inst_pending = False
+        for inst in depsgraph.object_instances:
+            obj=inst.object
+            if obj.type!='MESH': continue
+            if not inst.show_self: continue
+            if getattr(inst, 'is_instance', False):
+                key = _draw_key(inst)
+                if key in inst_keys:      # already handled this frame
+                    continue
+                inst_keys.add(key)
+                # Only hash a cached instance when something might actually have changed. Hashing
+                # every instance mesh on EVERY depsgraph update (a selection click included) cost
+                # 3ms -> 327ms on a 150-mesh scatter.
+                # NOTE: do NOT gate on self._dirty -- it is always True while a rebuild runs, so the
+                # skip never fired (clicks stayed at 45ms). Gate on whether THIS instance's mesh is
+                # among the objects view_update actually marked dirty, plus a full re-extract.
+                cached_ok = key in self._batch_dict
+                if cached_ok and self._mesh_cache.get(key, {}).get('material_state') != _material_state(obj):
+                    cached_ok = False
+                    self._sig_cache.pop(key, None)
+                mesh_name = getattr(getattr(obj, 'data', None), 'name', None)
+                # Edited while no Rendered viewport existed? Scatter SOURCE meshes only ever match
+                # here (the source object isn't in the scene), and without this check every
+                # instance kept its old geometry after a Solid-view edit.
+                away_hit = bool(_EDITED_WHILE_AWAY) and (
+                    obj.name in _EDITED_WHILE_AWAY or
+                    (mesh_name is not None and ('mesh:' + mesh_name) in _EDITED_WHILE_AWAY))
+                if cached_ok and not away_hit and not getattr(self, '_force_full', False):
+                    dn = getattr(self, '_dirty_objects', None)
+                    if not dn or (obj.name not in dn and (mesh_name is None or mesh_name not in dn)):
+                        continue          # untouched + cached -> reuse, no hash
+                try: sig = _geo_sig(obj, getattr(obj, 'data', None), _va)
+                except Exception: sig = None
+                if cached_ok and self._sig_cache.get(key) == sig:
+                    continue              # cached + unchanged
+                if _inst_done > 0 and time.time() > _inst_budget_end:
+                    self._geo_pending = True; self._dirty = True
+                    self._inst_pending = True   # survives the non-instance loop's else-branch
+                    continue              # over budget -> finish next frame (re-iterated)
+                data = _extract_geometry(obj, depsgraph, mesh=getattr(obj, 'data', None), attr_name=_va)
+                if data:
+                    self._mesh_cache[key] = data
+                    self._batch_dict[key] = data['slots_list']
+                    self._queue_textures(data['slots_list'])
+                    self._sig_cache[key] = sig
+                    if _want_shadow_i:
+                        sb = _build_shadow_batch_from_cache(data)
+                        if sb: self._shadow_dict[key] = sb
+                    _inst_done += 1
+            else:
+                if obj.name not in current: current[obj.name]=obj
+
+        # Track the visible set so view_update can detect hide/unhide (which sets no flag).
+        self._vis_set = frozenset(current.keys())
+        self._visible_geometry_keys = self._vis_set | inst_keys
+
+        # 1) Drop objects that no longer exist / were hidden. Keep instance-geometry keys
+        #    ('i:...') that are still present this frame.
+        for name in list(self._mesh_cache.keys()):
+            if name not in current and name not in inst_keys:
+                self._mesh_cache.pop(name,None)
+                self._batch_dict.pop(name,None)
+                self._shadow_dict.pop(name,None)
+                self._sig_cache.pop(name,None)
+
+        # On (re)entry into rendered view the batches are already persisted. Verify each
+        # cached object's signature ONCE and mark only the changed ones dirty -> unchanged
+        # objects keep their persisted batch and are drawn immediately (no work).
+        if getattr(self, '_needs_verify', False):
+            # On (re)entry, confirm cached objects still match. This used to hash EVERY cached
+            # object's full buffers, which was free with the old 3-vertex signature but cost 0.87s
+            # per re-entry once the signature became a real hash (re-entry was 0.05s).
+            # Cheap pre-check first: counts + modifier state catch topology changes for free, and
+            # anything edited while we were away also arrives through view_update -> _dirty_objects.
+            # Only objects whose cheap key differs pay for a full hash.
+            # Anything edited while no Vertex-Lit viewport existed (Solid-view edits: vertex moves,
+            # paint, UVs) is recorded by the persistent depsgraph handler, because Blender destroys
+            # the engine on leaving Rendered view so those never reach view_update. Re-extract
+            # exactly those; everything else only pays the cheap counts+modifiers check below.
+            away = _EDITED_WHILE_AWAY
+            for name, obj in current.items():
+                if name not in self._batch_dict:
+                    continue
+                if self._mesh_cache.get(name, {}).get('material_state') != _material_state(obj):
+                    self._dirty_objects.add(name)
+                    continue
+                try:
+                    eo=obj.evaluated_get(depsgraph); me=getattr(eo,'data',None)
+                    if me is None:
+                        self._dirty_objects.add(name); continue
+                    if away and (name in away or
+                                 ('mesh:' + getattr(getattr(obj,'data',None),'name','')) in away):
+                        self._dirty_objects.add(name); continue
+                    prev = self._sig_cache.get(name)
+                    if prev is None:
+                        self._dirty_objects.add(name); continue
+                    mods = tuple((m.type, bool(m.show_viewport)) for m in obj.modifiers)
+                    cheap = (getattr(getattr(obj,'data',None),'name',''),
+                             len(me.vertices), len(me.polygons), mods)
+                    if prev[:4] != cheap:
+                        self._dirty_objects.add(name)      # topology/modifier change -> re-extract
+                except Exception:
+                    self._dirty_objects.add(name)
+            _EDITED_WHILE_AWAY.clear()
+            # Textures still missing (the previous engine was closed before streaming finished) -> requeue.
+            for _sl in self._batch_dict.values():
+                if isinstance(_sl, list):
+                    self._queue_textures(_sl)
+            self._needs_verify = False
+
+        # Re-extract only dirty objects + brand-new objects (no persisted batch).
+        dirty=set(getattr(self,'_dirty_objects',set()))
+        full = getattr(self,'_force_full',False)
+        if full:
+            to_do=set(current.keys())
+            # CONSUME IT NOW. It used to be cleared only when the queue fully drained, so on any
+            # scene bigger than one budget window every pass restarted with the full object set AND
+            # wiped _geo_share -> the queue never emptied. F12 then spun to its 120s cap and
+            # rendered with objects missing.
+            self._force_full = False
+        else:
+            to_do=(dirty & set(current.keys())) | {n for n in current if n not in self._batch_dict}
+
+        want_shadow = bool(vls and getattr(vls, 'use_shadows', False))
+        # Adaptive per-frame budget: spend more time extracting when a LOT is queued
+        # (initial/large load -> load fast), less when it's a small incremental edit
+        # (stay responsive). Batch creation must happen on the main thread in view_draw,
+        # so this is the main lever for load speed (threading can't move the GPU upload).
+        # v0.16.5: geometry-first extraction loads Azola (394 objects, 12M triangles) in ~1.3 s, so a big
+        # load takes one short freeze instead of many 0.1 s frames that each redraw the partial scene.
+        budget = 1.5 if len(to_do) > 8 else 0.04
+        budget_end = time.time() + budget
+        remaining = []
+        done = 0
+        # _geo_share lets linked duplicates share ONE extraction + GPU batch. It must survive across
+        # streaming passes: a duplicate often lands in a later pass than its original, and clearing
+        # it every pass made each one re-extract (Azola: 18.5M tris resident instead of 12.3M, +91
+        # extractions, entry 5.86s -> 10.77s). It is cleared when the queue finally drains (below),
+        # which is what actually prevents the unbounded growth.
+        if not hasattr(self, '_geo_share'):
+            self._geo_share = {}   # share key -> (data, slots, shadow_batch)
+        if not hasattr(self, '_geo_dup_ck'):
+            self._geo_dup_ck = set()
+        va = getattr(self, '_view_attr', '')
+        # Modified linked duplicates can't share by pointer: find cheap-key groups with 2+ members (kept
+        # for the whole load, like _geo_share, so a member in a later streaming pass still hashes).
+        _ck_counts = {}
+        for name in to_do:
+            o_ = current.get(name)
+            if o_ is None or not o_.modifiers:
+                continue
+            try:
+                m_ = getattr(o_.evaluated_get(depsgraph), 'data', None)
+                ck_ = _dup_candidate_key(o_, m_, va) if m_ is not None else None
+            except Exception:
+                ck_ = None
+            if ck_ is not None:
+                _ck_counts[ck_] = _ck_counts.get(ck_, 0) + 1
+        self._geo_dup_ck.update(k for k, c in _ck_counts.items() if c > 1)
+        for name in to_do:
+            if done > 0 and time.time() > budget_end:
+                remaining.append(name)
+                continue
+            obj=current.get(name)
+            if obj is None: continue
+            try:
+                eo=obj.evaluated_get(depsgraph); me=getattr(eo,'data',None)
+            except Exception:
+                eo=None; me=None
+            gsig = _cheap_sig(obj, me) if me is not None else None   # no buffer hash on the load path
+            skey = _geo_share_key(obj, eo, me, va)
+            shared = self._geo_share.get(skey) if skey is not None else None
+            hkey = None
+            if shared is None and me is not None and obj.modifiers and self._geo_dup_ck:
+                ck = _dup_candidate_key(obj, me, va)
+                if ck is not None and ck in self._geo_dup_ck:
+                    try:
+                        am = getattr(getattr(eo, 'active_material', None), 'name', '')
+                        hkey = ('h', _share_sig(obj, me, va), am)   # content hash + materials (v0.16.4 rule)
+                    except Exception:
+                        hkey = None
+                    if hkey is not None:
+                        shared = self._geo_share.get(hkey)
+            if shared is not None:
+                # Same evaluated mesh + materials already extracted (a linked duplicate) ->
+                # reuse the SAME batch, no re-extract or re-upload. Instant, so it doesn't
+                # count against the extraction budget; the draw loop draws it per-instance.
+                self._mesh_cache[name]=shared[0]
+                self._batch_dict[name]=shared[1]
+                if want_shadow and shared[2] is not None:
+                    self._shadow_dict[name]=shared[2]
+                self._sig_cache[name]=gsig
+                continue
+            data=_extract_geometry(obj,depsgraph,attr_name=va)
+            if data:
+                slots=data['slots_list']
+                self._mesh_cache[name]=data
+                self._batch_dict[name]=slots
+                self._queue_textures(slots)
+                sb=None
+                if want_shadow:
+                    sb=_build_shadow_batch_from_cache(data)
+                    if sb: self._shadow_dict[name]=sb
+                if skey is not None:
+                    self._geo_share[skey]=(data, slots, sb)
+                if hkey is not None:
+                    self._geo_share[hkey]=(data, slots, sb)
+                self._sig_cache[name]=gsig
+            done += 1
+
+        if remaining:
+            # more to load -> keep them pending and rebuild again next frame
+            self._dirty_objects = set(remaining)
+            self._dirty = True
+            self._geo_pending = True
+        else:
+            self._force_full=False
+            if hasattr(self,'_dirty_objects'): self._dirty_objects.clear()
+            # The INSTANCE loop sets _inst_pending when it runs out of budget. Clearing _geo_pending
+            # here dropped those leftovers permanently; clearing _dirty here was just as bad -- with
+            # _geo_pending True but _dirty False nothing schedules the next rebuild, so the viewport
+            # redrew forever while the remaining instances never loaded (measured: 5 of 150).
+            if getattr(self, '_inst_pending', False):
+                self._dirty = True            # keep rebuilding until the instances finish
+                self._geo_pending = True
+            else:
+                self._dirty = False
+                self._geo_pending = False
+                # Streaming finished: drop the share cache now. Holding it across edits leaked a
+                # full mesh copy + GPU batches per edit; dropping it only HERE keeps cross-pass
+                # duplicate sharing intact during the load.
+                self._geo_share = {}; self._geo_dup_ck = set()
+        self._shadow_dirty=True
+        self._material_states = {m.as_pointer(): (m.name, tuple(m.diffuse_color)) for m in bpy.data.materials}
+        if not getattr(self, '_final_render', False):
+            # Keep one bounded snapshot for fast re-entry, not aliases to a live
+            # viewport's dictionaries. F12 must never publish render-only geometry.
+            for persistent, local in ((_PERSIST_MESH, self._mesh_cache),
+                                      (_PERSIST_BATCH, self._batch_dict),
+                                      (_PERSIST_SHADOW, self._shadow_dict),
+                                      (_PERSIST_SIG, self._sig_cache)):
+                persistent.clear()
+                persistent.update(local)
+        if done or remaining:
+            print("[VertexLit] re-extracted {}/{} objs ({:.2f}s){}{}".format(
+                done, len(current), time.time()-t0,
+                " [full]" if full else "",
+                " (+{} streaming)".format(len(remaining)) if remaining else ""))
+
+
+    # ── Texture streaming (after the geometry is on screen) ───────────────
+
+    def _queue_textures(self, slots_list):
+        """Queue slot base-colour textures; they load after the geometry is on screen."""
+        q = getattr(self, '_tex_queue', None)
+        if q is None:
+            q = self._tex_queue = []
+        for entry in slots_list:
+            if isinstance(entry, list) and entry[2] is None and entry[1]:
+                q.append(entry)
+        if q:
+            self._tex_pending = True
+
+    def _stream_textures(self, budget=0.05):
+        """Load queued slot textures within `budget` seconds (at least one per call; None = all).
+        Smallest image files first, so most of the scene is textured almost immediately and huge
+        images (e.g. 10K reference sheets, ~0.5 s each) arrive last, one per frame."""
+        q = getattr(self, '_tex_queue', None)
+        items = getattr(self, '_tex_items', None)
+        if items is None:
+            items = self._tex_items = []
+        if q:
+            for entry in q:
+                try:
+                    mat = bpy.data.materials.get(entry[1]) if entry[1] else None
+                    img = _find_base_texture(mat)
+                except Exception:
+                    img = None
+                if img is not None:
+                    items.append((_image_bytes(img), id(entry), entry, img))
+            q.clear()
+            items.sort(key=lambda t: (t[0], t[1]), reverse=True)   # pop() from the end = smallest
+        t_end = None if budget is None else time.time() + budget
+        n = 0
+        while items:
+            if t_end is not None and n > 0 and time.time() > t_end:
+                break
+            _sz, _i, entry, img = items.pop()
+            if entry[2] is None:
+                try: entry[2] = _get_gpu_tex(img)
+                except Exception: pass
+            n += 1
+        self._tex_pending = bool(items)
+
+    # ── Shadow pass ───────────────────────────────────────────────────────
+
+    def _get_instance_chunks(self, records):
+        key = tuple(id(r) for r in records)
+        chunks = self._instance_chunks.get(key)
+        if chunks is None:
+            chunks = self._instance_chunks[key] = instancing.textures(records)
+        return chunks
+
+    def _apply_transform_updates(self):
+        changed_chunks = {}; changed_bounds = set()
+        for name, model in self._pending_transforms.items():
+            rec = self._normal_records[name]
+            rec[2] = model
+            try: rec[3] = model.to_3x3().inverted().transposed()
+            except Exception: rec[3] = model.to_3x3()
+            for group, index, bound_index in self._record_groups[name]:
+                chunks = group[2]
+                if chunks is not None:
+                    entry = changed_chunks.setdefault(id(chunks), (chunks, {}))
+                    entry[1][index] = rec
+                if bound_index is not None: changed_bounds.add(bound_index)
+        for chunks, changes in changed_chunks.values():
+            instancing.update(chunks, changes)
+        if self._group_bounds is not None:
+            centers, extents, unknown = self._group_bounds
+            for gi in changed_bounds:
+                lows = []; highs = []
+                for rec in self._draw_groups[gi][1]:
+                    mn = np.asarray(rec[5], dtype=np.float64)
+                    scale = np.asarray(rec[6], dtype=np.float64)
+                    size = np.divide(1.0, scale, out=np.zeros(3), where=scale>0)
+                    matrix = np.asarray(rec[2], dtype=np.float64)
+                    center = matrix[:3,:3] @ (mn+size*.5)+matrix[:3,3]
+                    extent = np.abs(matrix[:3,:3]) @ (size*.5)
+                    lows.append(center-extent); highs.append(center+extent)
+                lo=np.min(lows,axis=0); hi=np.max(highs,axis=0)
+                centers[gi]=(lo+hi)*.5; extents[gi]=(hi-lo)*.5
+        self._pending_transforms = {}
+        self._scene_records_dirty = False
+
+    def _get_scene_records(self, depsgraph):
+        """Snapshot draw metadata only when the depsgraph/geometry changes.
+
+        Do not retain DepsgraphObjectInstance or evaluated RNA references: those
+        expire on the next evaluation. Camera orbit alone can reuse the copied
+        matrices and shared slot lists for both the colour and shadow passes.
+        """
+        if getattr(self, '_pending_transforms', None) and not self._dirty:
+            self._apply_transform_updates()
+        if not getattr(self, '_scene_records_dirty', True):
+            return self._scene_records
+        records = []
+        self._normal_records = {}; self._instance_sources = set()
+        self._instance_chunks = {}; self._record_groups = {}
+        object_info = {}
+        for inst in depsgraph.object_instances:
+            obj = inst.object
+            if obj.type != 'MESH' or not inst.show_self:
+                continue
+            is_instance = inst.is_instance
+            info_key = (obj.as_pointer(), is_instance)
+            info = object_info.get(info_key)
+            if info is None:
+                key = _draw_key(inst)
+                cached = self._mesh_cache.get(key) or {}
+                info = object_info[info_key] = (key, obj.name, self._batch_dict.get(key),
+                    cached.get('gen_min', (0.0, 0.0, 0.0)), cached.get('gen_scale', (1.0, 1.0, 1.0)),
+                    bool(getattr(obj, 'vlr_outline_exclude', False)))
+            key, name, slots, gmin, gscale, exclude = info
+            if not slots:
+                continue
+            model = inst.matrix_world.copy()
+            try: nmat = model.to_3x3().inverted().transposed()
+            except Exception: nmat = model.to_3x3()
+            idx = len(records) + 1
+            oid = (1.0, 1.0, 1.0) if exclude else (
+                (idx & 255)/255.0, ((idx >> 8) & 255)/255.0, ((idx >> 16) & 255)/255.0)
+            rec = [key, name, model, nmat, slots, gmin, gscale, oid]
+            records.append(rec)
+            if is_instance: self._instance_sources.add(name)
+            else: self._normal_records[name] = rec
+        self._scene_records = records
+        groups = {}
+        shadow_groups = {}
+        self._has_mirrored = False
+        for rec in records:
+            mirrored = rec[2].is_negative
+            self._has_mirrored |= mirrored
+            for slot in rec[4]:
+                groups.setdefault((id(slot[0]), slot[1], mirrored), [slot, [], None])[1].append(rec)
+            shadow_groups.setdefault((id(self._mesh_cache.get(rec[0])), mirrored), [None, [], None])[1].append(rec)
+        self._draw_groups = list(groups.values())
+        self._shadow_groups = list(shadow_groups.values())
+        for gi, group in enumerate(self._draw_groups):
+            for index, rec in enumerate(group[1]):
+                if rec[0] == rec[1]: self._record_groups.setdefault(rec[1], []).append((group,index,gi))
+        for group in self._shadow_groups:
+            for index, rec in enumerate(group[1]):
+                if rec[0] == rec[1]: self._record_groups.setdefault(rec[1], []).append((group,index,None))
+        self._group_bounds = None
+        # Cull groups, not individual instances: repeated geometry stays in one
+        # GPU draw, while scenes with many distinct objects avoid off-screen work.
+        if len(self._draw_groups) > 64:
+            # Bulk-transform bounds once, then union members per draw group.
+            # Most groups in a unique-object scene have one member; avoid thousands
+            # of tiny NumPy allocations and reductions in that common case.
+            record_index={id(r):i for i,r in enumerate(records)}
+            mn=np.asarray([r[5] for r in records],dtype=np.float64)
+            scale=np.asarray([r[6] for r in records],dtype=np.float64)
+            half=np.divide(.5,scale,out=np.zeros_like(scale),where=scale>0)
+            mat=np.asarray([tuple(r[2][0])+tuple(r[2][1])+tuple(r[2][2]) for r in records],
+                           dtype=np.float64).reshape(-1,3,4)
+            rc=np.einsum('nij,nj->ni',mat[:,:,:3],mn+half)+mat[:,:,3]
+            re=np.einsum('nij,nj->ni',np.abs(mat[:,:,:3]),half)
+            known=np.asarray(['gen_min' in (self._mesh_cache.get(r[0]) or {}) and
+                              'gen_scale' in (self._mesh_cache.get(r[0]) or {}) for r in records])
+            count=len(self._draw_groups)
+            centers=np.empty((count,3));extents=np.empty((count,3));unknown=np.empty(count,dtype=bool)
+            for gi,(_slot,members,_chunks) in enumerate(self._draw_groups):
+                if len(members)==1:
+                    ri=record_index[id(members[0])]
+                    centers[gi]=rc[ri];extents[gi]=re[ri];unknown[gi]=not known[ri]
+                else:
+                    indices=[record_index[id(r)] for r in members]
+                    lo=np.min(rc[indices]-re[indices],axis=0);hi=np.max(rc[indices]+re[indices],axis=0)
+                    centers[gi]=(lo+hi)*.5;extents[gi]=(hi-lo)*.5;unknown[gi]=not np.all(known[indices])
+            self._group_bounds=(centers,extents,unknown)
+        self._scene_records_dirty = False
+        return records
+
+    def _visible_draw_groups(self, view_proj):
+        bounds = self._group_bounds
+        if bounds is None:
+            return self._draw_groups
+        matrix=np.asarray(view_proj,dtype=np.float64)
+        planes=np.asarray([matrix[3]+matrix[i]*sign for i in range(3) for sign in (-1,1)])
+        centers,extents,unknown=bounds
+        distance=centers @ planes[:,:3].T + planes[:,3]
+        radius=extents @ np.abs(planes[:,:3]).T
+        visible=np.all(distance+radius >= -1e-5,axis=1) | unknown
+        # Shadow draws deliberately use the complete caster set.
+        return (group for group, keep in zip(self._draw_groups,visible) if keep)
+
+    def _shadow_pass(self, ls_mat, shad_res, depsgraph, shadow_map=None):
+        smap = shadow_map
+        if smap is None:
+            smap = getattr(self, '_viewport_shadow_map', None)
+            if smap is None:
+                smap = self._viewport_shadow_map = _ShadowMap(shad_res)
+                self._shadow_dirty = True
+            elif smap.size != shad_res:
+                smap.resize(shad_res)
+                self._shadow_dirty = True
+        if not self._shadow_dirty and self._shadow_tex_cache is smap.tex:
+            return self._shadow_tex_cache
+        shader=_get_shadow_shader()
+        with smap.fb.bind():
+            smap.fb.clear(depth=1.0)
+            gpu.state.depth_test_set('LESS_EQUAL')
+            gpu.state.depth_mask_set(True)
+            gpu.state.viewport_set(0,0,shad_res,shad_res)
+            shader.bind()
+            shader.uniform_float('uLightSpace',ls_mat)
+            # Iterate instances so each gets its own matrix_world (not source object's)
+            self._get_scene_records(depsgraph)
+            base_cull = getattr(self, '_cull', 'BACK')
+            last_cull = base_cull
+            gpu.state.face_culling_set(base_cull)
+            mirrored_scene = self._has_mirrored
+            for group in self._shadow_groups:
+                records = group[1]
+                key, name, model, nmat, slots, gmin, gsc, oid = records[0]
+                if mirrored_scene:
+                    cull = _model_cull(base_cull, model)
+                    if cull != last_cull:
+                        gpu.state.face_culling_set(cull)
+                        last_cull = cull
+                batch = self._shadow_dict.get(key)
+                if batch is None:
+                    # Shadows were just enabled after the geometry loaded -> build the
+                    # (position-only) shadow batch on demand from the cached mesh data.
+                    cached = self._mesh_cache.get(key)
+                    if cached is not None:
+                        batch = _build_shadow_batch_from_cache(cached)
+                        if batch is not None:
+                            self._shadow_dict[key] = batch
+                if batch is None: continue
+                if len(records) >= 4:
+                    ish = instancing.shader_for(shader, SHADOW_VERT, SHADOW_FRAG)
+                    if ish is not None:
+                        if group[2] is None: group[2] = self._get_instance_chunks(records)
+                        ish.bind()
+                        ish.uniform_float('uLightSpace', ls_mat)
+                        instancing.draw(batch, ish, group[2])
+                        continue
+                shader.bind()
+                for rec in records:
+                    shader.uniform_float('uModel', rec[2])
+                    batch.draw(shader)
+        self._shadow_tex_cache=smap.tex
+        self._shadow_dirty=False
+        return smap.tex
+
+    # ── Per-frame uniforms (shared by legacy + per-material shaders) ──────
+
+    def _apply_frame_uniforms(self, shader, view_proj, ls_mat, sky, ground, bstr,
+                              do_shad, s_bias, s_dark, shad_tex, lights, studio):
+        # Programs differ by shading mode (Solid studio vs per-pixel lit) and don't all
+        # declare the same uniforms, so set each defensively — a uniform the current
+        # program doesn't have simply raises ValueError and is skipped.
+        def sf(name, val):
+            try: shader.uniform_float(name, val)
+            except (ValueError, Exception): pass
+        def si(name, val):
+            try: shader.uniform_int(name, val)
+            except (ValueError, Exception): pass
+        def ss(name, val):
+            try: shader.uniform_sampler(name, val)
+            except (ValueError, Exception): pass
+
+        sf('uViewProj', view_proj)
+        # Workbench studio light (camera-following key + flat ambient)
+        key_dir, key_col, key_int = studio
+        sf('uKeyDir', key_dir); sf('uKeyCol', key_col); sf('uKeyIntensity', key_int)
+        # Scene-light / shadow uniforms (present only in the PIXEL program)
+        sf('uLightSpace', ls_mat); sf('uSkyColor', sky); sf('uGroundColor', ground)
+        # Sun + hemisphere intensity (stacked lighting), from self._sun set each frame.
+        _sd, _sc, _si, _hi = getattr(self, '_sun', ((0.0, 0.0, 1.0), (1.0, 1.0, 1.0), 0.0, 1.0))
+        sf('uSunDir', _sd); sf('uSunColor', _sc); sf('uSunIntensity', _si)
+        sf('uHemiIntensity', _hi)
+        si('uUseShadow', 1 if do_shad else 0)
+        sf('uShadowBias', s_bias); sf('uShadowSoft', s_dark); ss('uShadowMap', shad_tex)
+        sf('uShadowTexelWorld', getattr(self, '_shadow_texel', 0.0))
+        si('uNumLights', len(lights))
+        for i in range(8):
+            l=lights[i] if i<len(lights) else None
+            sf(f'uLPos[{i}]',    tuple(l['pos'])  if l else (0,0,0))
+            sf(f'uLDir[{i}]',    tuple(l['dir'])  if l else (0,0,-1))
+            sf(f'uLCol[{i}]',    l['color']       if l else (0,0,0))
+            sf(f'uLEnergy[{i}]', l['energy']      if l else 0.0)
+            si(f'uLType[{i}]',   l['type']        if l else 0)
+            sf(f'uLRadius[{i}]', l['radius']      if l else 1.0)
+
+    # ── Shared scene draw (used by the viewport AND F12 render) ─────────────
+
+    def _draw_background(self, vls, view_proj, sky, ground):
+        """Fullscreen background: world hemisphere gradient or a flat colour."""
+        try:
+            bgsh, bgbatch = _get_bg()
+            bgsh.bind()
+            mode = getattr(vls, 'background_mode', 'WORLD')
+            bgsh.uniform_float('uInvViewProj', view_proj.inverted())
+            bgsh.uniform_float('uCamPos', getattr(self, '_cam_pos', (0.0, 0.0, 0.0)))
+            bgsh.uniform_float('uSkyColor', sky)
+            bgsh.uniform_float('uGroundColor', ground)
+            bgsh.uniform_int('uBgMode', 0 if mode == 'WORLD' else 1)
+            bgc = tuple(vls.background_color) if vls else (0.05, 0.05, 0.05)
+            bgsh.uniform_float('uBgColor', bgc)
+            gpu.state.depth_test_set('NONE'); gpu.state.depth_mask_set(False)
+            bgbatch.draw(bgsh)
+            gpu.state.depth_test_set('LESS_EQUAL'); gpu.state.depth_mask_set(True)
+        except Exception as e:
+            print(f"[VertexLit] background: {e}")
+
+    def _draw_viewmode(self, depsgraph, vls, view_proj, studio, ls_mat, sky, ground,
+                       bstr, lights, view_mode):
+        """Solid / Random / Attribute / Normal view: one shared lit shader, no materials."""
+        sh = _get_viewmode_shader(); sh.bind()
+        self._apply_frame_uniforms(sh, view_proj, ls_mat, sky, ground, bstr,
+                                   False, 0.005, 0.25, self._dummy_depth, lights, studio)
+        vmid = _VIEWMODE_ID.get(view_mode, 1)
+        rand_mode = getattr(vls, 'random_mode', 'OBJECT') if vls else 'OBJECT'
+        def sf(n, v):
+            try: sh.uniform_float(n, v)
+            except Exception: pass
+        try: sh.uniform_int('uViewMode', vmid)
+        except Exception: pass
+        sf('uSolidColor', tuple(vls.solid_color) if vls else (0.8, 0.8, 0.8))
+        sf('uCamPos', getattr(self, '_cam_pos', (0.0, 0.0, 0.0)))
+        # Depth range: auto-fit to the scene's distance from the camera, or manual.
+        if vls and vmid == 5 and getattr(vls, 'depth_auto', True):
+            try:
+                c, r = self._bounds_cache
+                d = (Vector(self._cam_pos) - Vector(c)).length
+                dmin = max(0.0, d - r); dmax = d + r
+                if dmax - dmin < 1e-4: dmax = dmin + 1.0
+            except Exception:
+                dmin, dmax = (vls.depth_min, vls.depth_max)
+        else:
+            dmin = vls.depth_min if vls else 0.0
+            dmax = vls.depth_max if vls else 20.0
+        sf('uDepthMin', dmin); sf('uDepthMax', dmax)
+        # Normal-view space (world / screen)
+        try:
+            sh.uniform_int('uNormalSpace', 1 if (vls and vls.normal_space == 'SCREEN') else 0)
+        except Exception: pass
+        vm3 = getattr(self, '_view_mat3', None)
+        if vm3 is not None:
+            sf('uViewMat3', vm3)
+        gpu.state.depth_test_set('LESS_EQUAL'); gpu.state.depth_mask_set(True)
+        gpu.state.face_culling_set(getattr(self, '_cull', 'BACK'))
+        for inst in depsgraph.object_instances:
+            obj = inst.object
+            if obj.type != 'MESH' or not inst.show_self: continue
+            slots = self._batch_dict.get(_draw_key(inst))
+            if not slots: continue
+            cached = self._mesh_cache.get(_draw_key(inst))
+            gmin = cached.get('gen_min', (0.0, 0.0, 0.0)) if cached else (0.0, 0.0, 0.0)
+            gsc = cached.get('gen_scale', (1.0, 1.0, 1.0)) if cached else (1.0, 1.0, 1.0)
+            try: nmat = inst.matrix_world.to_3x3().inverted().transposed()
+            except Exception: nmat = inst.matrix_world.to_3x3()
+            # Each uniform set independently — some (uGenMin/uGenScale) are optimised out of
+            # this program, and a shared try/except would skip uObjColor after the first miss.
+            sf('uModel', inst.matrix_world)
+            gpu.state.face_culling_set(_model_cull(getattr(self, '_cull', 'BACK'), inst.matrix_world))
+            sf('uNormalMat', nmat)
+            sf('uGenMin', gmin); sf('uGenScale', gsc)
+            if vmid == 2 and rand_mode == 'OBJECT':
+                sf('uObjColor', _obj_random_color(obj.name))
+            for batch, _mat_name, _tex in slots:
+                if vmid == 2 and rand_mode == 'MATERIAL':
+                    sf('uObjColor', _obj_random_color(_mat_name or '__no_material__'))
+                try: batch.draw(sh)
+                except Exception: pass
+
+    def _aux_frame_uniforms(self, sh):
+        """Uniforms for the G-buffer aux outputs (view normal + object id) of the main pass."""
+        try: sh.uniform_float('uViewMat3', getattr(self, '_view_mat3', None) or Matrix.Identity(3))
+        except Exception: pass
+        try: sh.uniform_float('uAuxA', 1.0)
+        except Exception: pass
+
+    def _draw_batches(self, depsgraph, vls, view_proj, studio, ls_mat, sky, ground,
+                      bstr, do_shad, s_bias, s_dark, shad_tex, lights, mode):
+        legacy=_get_main_shader(mode)
+        frame_done={}; params_bound={}
+        # Progressive compile: sharpen at most ~40ms of new material shaders per frame,
+        # so the scene shows instantly (base-texture path) instead of freezing while
+        # every material compiles up front. While geometry is still STREAMING in, don't
+        # compile at all (draw base textures) so the two budgets don't stack — geometry
+        # loads first, materials sharpen once it's done.
+        _compile_deadline = (float('inf') if getattr(self, '_final_render', False) else
+                             time.time() + (0.0 if getattr(self, '_geo_pending', False) else 0.04))
+        self._mat_pending = False
+        last_shader = [None]
+
+        def _ensure_frame(sh):
+            if last_shader[0] is not sh:
+                sh.bind()
+                last_shader[0] = sh
+            if id(sh) not in frame_done:
+                self._apply_frame_uniforms(sh, view_proj, ls_mat, sky, ground, bstr,
+                                           do_shad, s_bias, s_dark, shad_tex, lights, studio)
+                self._aux_frame_uniforms(sh)
+                # Retain the GPU program until this draw ends. Mid-frame material
+                # invalidation can evict instance shaders; recycled Python IDs must
+                # never inherit another program's initialized-uniform marker.
+                frame_done[id(sh)] = sh
+
+        gpu.state.depth_test_set('LESS_EQUAL')
+        gpu.state.depth_mask_set(True)
+        gpu.state.face_culling_set(getattr(self, '_cull', 'BACK'))
+
+        # Background (behind everything). Skipped for a film-transparent render.
+        if not getattr(self, '_film_transparent', False):
+            self._draw_background(vls, view_proj, sky, ground)
+
+        # Non-textured view modes bypass the material programs entirely.
+        view_mode = getattr(vls, 'view_mode', 'TEXTURED')
+        if view_mode != 'TEXTURED':
+            self._draw_viewmode(depsgraph, vls, view_proj, studio, ls_mat, sky, ground,
+                                bstr, lights, view_mode)
+            return
+
+        # Resolve each material's program at most ONCE per frame (materials are shared
+        # across many objects; the peek can run topo_signature for dirty materials, so
+        # doing it per-object per-frame is a real cost while editing).
+        frame_progs = {}
+        frame_transp = {}   # mat name -> bool (transparent), computed once per frame
+        def _resolve_prog(mat_name):
+            if mat_name in frame_progs:
+                return frame_progs[mat_name]
+            mat = bpy.data.materials.get(mat_name) if mat_name else None
+            prog = None
+            if mat is not None and getattr(mat, 'use_nodes', False):
+                p = material_shader.get_program(mat, mode, may_compile=False)
+                if p is None:
+                    if time.time() < _compile_deadline:
+                        p = material_shader.get_program(mat, mode, may_compile=True)
+                    else:
+                        self._mat_pending = True
+                if p and not p['failed'] and p['shader'] is not None:
+                    prog = p
+            frame_progs[mat_name] = prog
+            return prog
+
+        transparent = []   # (sort_depth, draw_fn) for a back-to-front blended pass
+
+        aux_a = [1.0]          # 0.0 in the blended pass -> aux targets keep the opaque surface
+        aux_on = bool(getattr(self, '_aux_active', False))
+        self._get_scene_records(depsgraph)
+        last_cull = [getattr(self, '_cull', 'BACK')]
+        mirrored_scene = getattr(self, '_has_mirrored', False)
+
+        def _draw_one(prog, mat, batch, tex, model, nmat, gmin, gsc, oname, objid=(0.0, 0.0, 0.0), instance_shader=None, chunks=None):
+            if mirrored_scene:
+                cull = _model_cull(getattr(self, '_cull', 'BACK'), model)
+                if cull != last_cull[0]:
+                    gpu.state.face_culling_set(cull)
+                    last_cull[0] = cull
+            if prog is not None:
+                sh=instance_shader if instance_shader is not None else prog['shader']
+                binding_changed = params_bound.get(id(sh)) is not prog
+                rebind_samplers = last_shader[0] is not sh or binding_changed
+                _ensure_frame(sh)
+                if aux_on:
+                    try:
+                        if chunks is None: sh.uniform_float('uObjId', objid)
+                        sh.uniform_float('uAuxA', aux_a[0])
+                    except Exception: pass
+                if binding_changed:
+                    nt=mat.node_tree if mat else None
+                    for p in prog['params']:
+                        try: sh.uniform_float(p.uniform, p.value(nt))
+                        except Exception: pass
+                    params_bound[id(sh)] = prog
+                if rebind_samplers:
+                    for uni,image in prog['samplers']:
+                        gtex=_get_gpu_tex(image)
+                        if gtex is not None:
+                            try: sh.uniform_sampler(uni,gtex)
+                            except Exception: pass
+                if chunks is None:
+                    sh.uniform_float('uModel',model)
+                    sh.uniform_float('uNormalMat',nmat)
+                try: sh.uniform_float('uGenMin',gmin); sh.uniform_float('uGenScale',gsc)
+                except Exception: pass
+                try:
+                    if chunks is None: batch.draw(sh)
+                    else: instancing.draw(batch, sh, chunks)
+                except Exception:
+                    self._batch_dict.pop(oname, None); self._dirty_objects.add(oname); self._dirty=True
+            else:
+                sh = instance_shader if instance_shader is not None else legacy
+                _ensure_frame(sh)
+                if aux_on:
+                    try:
+                        if chunks is None: sh.uniform_float('uObjId', objid)
+                        sh.uniform_float('uAuxA', aux_a[0])
+                    except Exception: pass
+                if chunks is None:
+                    sh.uniform_float('uModel',model)
+                    sh.uniform_float('uNormalMat',nmat)
+                try: sh.uniform_float('uGenMin',gmin); sh.uniform_float('uGenScale',gsc)
+                except Exception: pass
+                sh.uniform_sampler('uAlbedo', tex if tex is not None else self._white_tex)
+                sh.uniform_int('uHasTexture', 1 if tex is not None else 0)
+                try:
+                    if chunks is None: batch.draw(sh)
+                    else: instancing.draw(batch, sh, chunks)
+                except Exception:
+                    self._batch_dict.pop(oname, None); self._dirty_objects.add(oname); self._dirty=True
+
+        for group in self._visible_draw_groups(view_proj):
+            slot, records, chunks = group
+            batch, mat_name, tex = slot
+            prog = _resolve_prog(mat_name)
+            mat = bpy.data.materials.get(mat_name) if mat_name else None
+            is_transp = frame_transp.get(mat_name)
+            if is_transp is None:
+                is_transp = _material_transparent(mat)
+                frame_transp[mat_name] = is_transp
+            if len(records) >= 4 and not is_transp:
+                base = prog['shader'] if prog is not None else legacy
+                frag = prog['frag'] if prog is not None else (WORKBENCH_FRAG if mode == 'WORKBENCH' else PHONG_FRAG)
+                ish = instancing.shader_for(base, PHONG_VERT, frag)
+                if ish is not None:
+                    if chunks is None:
+                        chunks = group[2] = self._get_instance_chunks(records)
+                    key, oname, model, normal_mat, slots, gmin, gsc, objid = records[0]
+                    _draw_one(prog, mat, batch, tex, model, normal_mat, gmin, gsc, oname, objid, ish, chunks)
+                    continue
+            for key, oname, model, normal_mat, slots, gmin, gsc, objid in records:
+                if is_transp:
+                    try:
+                        c = model.translation; clip = view_proj @ c.to_4d()
+                        d = clip.z / clip.w if abs(clip.w) > 1e-6 else 0.0
+                    except Exception:
+                        d = 0.0
+                    transparent.append((d, (prog, mat, batch, tex, model, normal_mat, gmin, gsc, oname, objid)))
+                else:
+                    _draw_one(prog, mat, batch, tex, model, normal_mat, gmin, gsc, oname, objid)
+
+        # Transparent pass: farthest first, alpha blend, no depth write (still tested).
+        if transparent:
+            transparent.sort(key=lambda x: x[0], reverse=True)
+            gpu.state.blend_set('ALPHA')
+            gpu.state.depth_mask_set(False)
+            # ALPHA blending accumulates coverage on transparent film while preserving
+            # opaque backgrounds. Suppressing alpha writes would erase isolated glass.
+            aux_a[0] = 0.0          # alpha 0 + ALPHA blending leaves normal/id untouched
+            for _d, args in transparent:
+                _draw_one(*args)
+            aux_a[0] = 1.0
+            gpu.state.blend_set('NONE')
+            gpu.state.depth_mask_set(True)
+
+    # ── Main draw ─────────────────────────────────────────────────────────
+
+    def _draw_splats(self):
+        """Draw generated splat clouds (from the splat_render registry) into the current framebuffer."""
+        from . import splat_render
+        clouds = splat_render.SCENE_CLOUDS
+        anchors = getattr(self, '_splat_anchors', [])
+        if not clouds and not anchors:
+            return
+        vm = getattr(self, '_splat_vm', None); pm = getattr(self, '_splat_pm', None)
+        wh = getattr(self, '_splat_wh', None)
+        if vm is None or pm is None or wh is None:
+            return
+        light = getattr(self, '_splat_light', None)
+        wd = getattr(self, '_splat_need_depth', True)
+        uc = getattr(self, '_splat_use_compute', False)
+        gs = bool(getattr(self, '_splat_gpu_sort', False))
+        for c in clouds:
+            c._gpu_sort = gs; c._radix_pref = bool(getattr(self,"_splat_radix",True))
+        if getattr(self, '_splat_stoch', False) and getattr(self, '_stoch_view', False):
+            # Stochastic points (viewport only): needs the G-buffer's mesh depth to test points against.
+            try:
+                from . import splat_stochastic as SS
+                R = SS.get()
+                gb = getattr(getattr(self, '_post', None), 'gbuf', None)
+                if R is not None and gb is not None and gb.depth is not None:
+                    entries = [(c, Matrix.Identity(4), '') for c in clouds]
+                    for (mw, sid, name) in anchors:
+                        cl = splat_render.SPLAT_CLOUDS.get(sid)
+                        if cl is not None:
+                            entries.append((cl, mw, name))
+                    self._stoch_more = R.render(entries, vm, pm, gb.w, gb.h, wh[0], gb.depth, light=light,
+                                                backface=getattr(self, '_splat_backface', False),
+                                                epoch=getattr(self, '_stoch_epoch', 0))
+                    return
+            except Exception as e:
+                print("[VertexLit] stochastic splats failed -> sorted:", e)
+                self._splat_stoch = False
+        if getattr(self, '_splat_tile', False):
+            from . import splat_tile as ST
+            any_ok = False
+            for c in clouds:
+                try:
+                    if getattr(c, '_tile', None) is None:
+                        c._tile = ST.TileRasterizer(c)
+                    out = c._tile.render(vm, pm, wh[0], wh[1], light=getattr(self,'_splat_light',None))
+                    if out is not None:
+                        ST.composite(out); any_ok = True
+                except Exception as e:
+                    if _DEBUG: print("[VertexLit] tile raster -> fallback:", e)
+            for (mw, sid, name) in anchors:
+                cloud = splat_render.SPLAT_CLOUDS.get(sid)
+                if cloud is None:
+                    continue
+                try:
+                    if getattr(cloud, '_tile', None) is None:
+                        cloud._tile = ST.TileRasterizer(cloud)
+                    out = cloud._tile.render(vm, pm, wh[0], wh[1], light=getattr(self,'_splat_light',None), model=mw)
+                    if out is not None:
+                        ST.composite(out); any_ok = True
+                except Exception as e:
+                    if _DEBUG: print("[VertexLit] tile anchor -> fallback:", e)
+            if any_ok:
+                return   # tile path handled the splats
+        bf = getattr(self, '_splat_backface', False)
+        # UNIFIED PATH: with 2+ anchored clouds, sort every splat of every cloud into ONE global
+        # back-to-front order and draw them in one pass. Without this each cloud sorts/draws
+        # independently, so where two trees overlap the one drawn LAST wins regardless of depth
+        # (the reported "trees render in front of trees that are behind them" bug).
+        if getattr(self, '_splat_unified', True) and len(anchors) > 1:
+            try:
+                from . import splat_unified as SU
+                entries = []
+                for (mw, sid, name) in anchors:
+                    cl = splat_render.SPLAT_CLOUDS.get(sid)
+                    if cl is None:
+                        continue
+                    cl.ensure_gpu()
+                    entries.append((cl, mw, name))
+                # use each cloud's own softness (as the per-cloud path does); `vls` is NOT in
+                # scope here -- referencing it raised a NameError that the except swallowed, so the
+                # unified draw was never even called.
+                sig = float(getattr(entries[0][0], 'sigma', 2.2)) if entries else 2.2
+                if len(entries) > 1 and SU.SORTER.draw(entries, vm, pm, wh[0], wh[1],
+                                                       light=light, sigma=sig, write_depth=wd):
+                    return   # unified path handled every anchored cloud
+            except Exception as e:
+                if _DEBUG: print("[VertexLit] unified splat draw -> per-cloud:", e)
+        for c in clouds:                              # legacy unanchored clouds (identity)
+            try:
+                c.draw(vm, pm, wh[0], wh[1], write_depth=wd, light=light, use_compute=uc, backface=bf)
+            except Exception as e:
+                if _DEBUG: print("[VertexLit] splat draw:", e)
+        for (mw, sid, name) in anchors:               # object-anchored clouds (selectable/duplicatable)
+            cloud = splat_render.SPLAT_CLOUDS.get(sid)
+            if cloud is None:
+                continue
+            cloud._gpu_sort = gs; cloud._radix_pref = bool(getattr(self,"_splat_radix",True))
+            try:
+                cloud.draw(vm, pm, wh[0], wh[1], write_depth=wd, light=light, use_compute=uc,
+                           backface=bf, model=mw, obj_key=name)
+            except Exception as e:
+                if _DEBUG: print("[VertexLit] splat anchor draw:", e)
+
+    def _draw_splat_normals(self, view_mat3):
+        """Render splat normals into the cavity normal buffer (so the cavity effect includes splats)."""
+        from . import splat_render
+        clouds = splat_render.SCENE_CLOUDS
+        anchors = getattr(self, '_splat_anchors', [])
+        if (not clouds and not anchors) or view_mat3 is None:
+            return
+        vm = getattr(self, '_splat_vm', None); pm = getattr(self, '_splat_pm', None)
+        wh = getattr(self, '_splat_wh', None)
+        if vm is None or pm is None or wh is None:
+            return
+        bf = getattr(self, '_splat_backface', False)
+        for c in clouds:
+            try:
+                c.draw_normals(vm, pm, view_mat3, wh[0], wh[1], backface=bf)
+            except Exception as e:
+                if _DEBUG: print("[VertexLit] splat normals:", e)
+        for (mw, sid, name) in anchors:
+            cloud = splat_render.SPLAT_CLOUDS.get(sid)
+            if cloud is None:
+                continue
+            try:
+                cloud.draw_normals(vm, pm, view_mat3, wh[0], wh[1], backface=bf, model=mw, obj_key=name)
+            except Exception as e:
+                if _DEBUG: print("[VertexLit] splat anchor normals:", e)
+
+    def _make_post_ctx(self, depsgraph, vls, view_proj, view_mat3, proj, rw, rh, wc,
+                       studio, ls_mat, sky, ground, bstr, lights,
+                       do_shad=False, s_bias=0.0015, s_soft=1.5, shad_tex=None):
+        """Build the draw-scene callback + post_ctx (AO occluders, ID pass, normal pass,
+        effect params). Shared by the viewport and the F12 render so both get effects."""
+        cull = getattr(self, '_cull', 'BACK')
+
+        def _draw_objects():
+            self._draw_batches(depsgraph, vls, view_proj, studio, ls_mat, sky, ground,
+                               bstr, do_shad, s_bias, s_soft,
+                               shad_tex if shad_tex is not None else self._dummy_depth,
+                               lights, 'PIXEL')
+            self._draw_splats()
+
+        ao_occluders = None
+        if vls and getattr(vls, 'use_ao', False):
+            any_excl = any(getattr(i.object, 'vlr_ao_exclude', False)
+                           for i in depsgraph.object_instances if i.object.type == 'MESH')
+            if any_excl:
+                def ao_occluders():
+                    sh = _get_main_shader('PIXEL'); sh.bind()
+                    try: sh.uniform_float('uViewProj', view_proj)
+                    except Exception: pass
+                    gpu.state.face_culling_set(cull)
+                    for i in depsgraph.object_instances:
+                        o = i.object
+                        if o.type != 'MESH' or not i.show_self: continue
+                        if getattr(o, 'vlr_ao_exclude', False): continue
+                        sl = self._batch_dict.get(_draw_key(i))
+                        if not sl: continue
+                        gpu.state.face_culling_set(_model_cull(cull, i.matrix_world))
+                        try: sh.uniform_float('uModel', i.matrix_world)
+                        except Exception: pass
+                        for b, _mn, _tx in sl:
+                            try: b.draw(sh)
+                            except Exception: pass
+
+        # The main pass writes the view-normal and object-id buffers as extra render targets
+        # (see shaders.AUX_CHUNK), so neither needs its own full re-draw of the scene. Splats are
+        # not part of that pass, so their normals are still drawn -- onto the same buffer.
+        want_aux = bool(vls and (getattr(vls, 'use_outline', False) or getattr(vls, 'use_cavity', False)))
+        self._aux_active = want_aux
+
+        ids_cb = None
+        if (not want_aux) and vls and (getattr(vls, 'use_outline', False) or getattr(vls, 'use_cavity', False)):
+            def ids_cb():
+                sh = _get_id_shader(); sh.bind()
+                try: sh.uniform_float('uViewProj', view_proj)
+                except Exception: pass
+                gpu.state.depth_test_set('LESS_EQUAL'); gpu.state.depth_mask_set(True)
+                gpu.state.face_culling_set(cull)
+                idx = 1
+                for i in depsgraph.object_instances:
+                    o = i.object
+                    if o.type != 'MESH' or not i.show_self: continue
+                    sl = self._batch_dict.get(_draw_key(i))
+                    if not sl: continue
+                    gpu.state.face_culling_set(_model_cull(cull, i.matrix_world))
+                    if getattr(o, 'vlr_outline_exclude', False):
+                        col = (1.0, 1.0, 1.0)
+                    else:
+                        col = ((idx & 0xFF)/255.0, ((idx >> 8) & 0xFF)/255.0, ((idx >> 16) & 0xFF)/255.0)
+                    try:
+                        sh.uniform_float('uModel', i.matrix_world)
+                        sh.uniform_float('uId', col)
+                    except Exception: pass
+                    for b, _mn, _tx in sl:
+                        try: b.draw(sh)
+                        except Exception: pass
+                    idx += 1
+
+        splat_normals_cb = None
+        if want_aux and vls and getattr(vls, 'use_cavity', False):
+            def splat_normals_cb():
+                self._draw_splat_normals(view_mat3)
+
+        normals_cb = None
+        if (not want_aux) and vls and getattr(vls, 'use_cavity', False):
+            def normals_cb():
+                sh = _get_normal_shader(); sh.bind()
+                try:
+                    sh.uniform_float('uViewProj', view_proj)
+                    sh.uniform_float('uViewMat3', view_mat3)
+                except Exception: pass
+                gpu.state.depth_test_set('LESS_EQUAL'); gpu.state.depth_mask_set(True)
+                gpu.state.face_culling_set(cull)
+                for i in depsgraph.object_instances:
+                    o = i.object
+                    if o.type != 'MESH' or not i.show_self: continue
+                    sl = self._batch_dict.get(_draw_key(i))
+                    if not sl: continue
+                    gpu.state.face_culling_set(_model_cull(cull, i.matrix_world))
+                    try: nmat = i.matrix_world.to_3x3().inverted().transposed()
+                    except Exception: nmat = i.matrix_world.to_3x3()
+                    try:
+                        sh.uniform_float('uModel', i.matrix_world)
+                        sh.uniform_float('uNormalMat', nmat)
+                    except Exception: pass
+                    for b, _mn, _tx in sl:
+                        try: b.draw(sh)
+                        except Exception: pass
+                self._draw_splat_normals(view_mat3)
+
+        try: inv_vp = view_proj.inverted()
+        except Exception: inv_vp = Matrix.Identity(4)
+        post_ctx = {
+            'proj': proj, 'inv_proj': proj.inverted(),
+            'view_proj': view_proj, 'inv_view_proj': inv_vp,
+            'prev_view_proj': getattr(self, '_prev_view_proj', view_proj),
+            'scene_key': getattr(self, '_stoch_epoch', 0),
+            'view_still': (getattr(self, '_prev_view_proj', None) is not None
+                           and all(abs(a - b) < 1e-7 for ra, rb in zip(view_proj, self._prev_view_proj)
+                                   for a, b in zip(ra, rb))),
+            'texel': (1.0/max(rw, 1), 1.0/max(rh, 1)),
+            'clear_color': (wc[0], wc[1], wc[2], 1.0) if wc else (0.08, 0.08, 0.08, 1.0),
+            'draw_ao_occluders': ao_occluders,
+            'draw_object_ids': ids_cb,
+            'draw_view_normals': normals_cb,
+            'draw_splat_normals': splat_normals_cb,
+            'want_aux': want_aux,
+            'ao_radius':   (vls.ao_radius   if vls else 0.5),
+            'ao_strength': (vls.ao_strength if vls else 1.0),
+            'ao_bias':     (vls.ao_bias     if vls else 0.02),
+            'ao_ridge':    (vls.ao_ridge    if vls else 0.0),
+            'ao_samples':  (int(vls.ao_samples) if vls else 16),
+            'cavity_ridge':  (vls.cavity_ridge  if vls else 1.0),
+            'cavity_valley': (vls.cavity_valley if vls else 1.0),
+            'outline_size':      (vls.outline_size  if vls else 1.5),
+            'outline_color':     (tuple(vls.outline_color) if vls else (0.0, 0.0, 0.0)),
+        }
+        return _draw_objects, post_ctx
+
+    def view_draw(self, context, depsgraph):
+        self._ensure_state()
+        self._ensure_resources()
+
+        scene=depsgraph.scene
+        vls=getattr(scene,'vertex_lit',None)
+
+        # Colour-attribute selection changed -> drop caches and re-extract everything so the
+        # new attribute is read into the vertex-colour buffers.
+        global _FORCE_REEXTRACT
+        if _FORCE_REEXTRACT:
+            _FORCE_REEXTRACT = False
+            self._mesh_cache.clear(); self._batch_dict.clear(); self._shadow_dict.clear()
+            self._sig_cache.clear()
+            self._dirty = True; self._force_full = True
+        # geometry lives only in the edit BMesh. Write it to a reused temp mesh (~0.5ms)
+        # and extract from that, so geometry edits show in real time. One object only.
+        eob = getattr(context, 'edit_object', None)
+        if eob is not None and eob.type == 'MESH':
+            try:
+                import bmesh
+                bm = bmesh.from_edit_mesh(eob.data)
+                if getattr(self, '_edit_tmp', None) is None:
+                    self._edit_tmp = bpy.data.meshes.new('_vlr_edit_tmp')
+                bm.to_mesh(self._edit_tmp)
+                data = _extract_mesh_data(eob, depsgraph, mesh=self._edit_tmp, attr_name=getattr(self,'_view_attr',''))
+                if data:
+                    self._mesh_cache[eob.name] = data
+                    self._batch_dict[eob.name] = _build_object_slots(data)
+                    self._scene_records_dirty = True
+            except Exception as e:
+                if _DEBUG: print("[VertexLit] edit-mode extract:", e)
+            self.tag_redraw()
+            try: context.region.tag_redraw()
+            except Exception: pass
+
+        if self._dirty:
+            self._rebuild(depsgraph,vls)
+        if not getattr(self, '_geo_pending', False):
+            self._stream_textures(0.05)      # textures stream in once the geometry is complete
+
+        sky   =tuple(vls.sky_color)    if vls else (0.05,0.07,0.10)
+        ground=tuple(vls.ground_color) if vls else (0.03,0.02,0.02)
+        bstr  =0.0
+        u_shad=vls.use_shadows        if vls else False
+        s_res =int(vls.shadow_resolution) if vls else 1024
+        s_bias=vls.shadow_bias        if vls else 0.005
+        s_dark=getattr(vls,'shadow_softness',1.5) if vls else 1.5   # PCF softness now
+
+        lights=self._lights_cache
+        # Objectless sun: cast shadows when the sun-shadow toggle is on AND the sun contributes.
+        self._sun = _compute_sun(vls)
+        sun_dir = self._sun[0]; sun_int = self._sun[2]
+        do_shad = bool(u_shad) and sun_int > 0.0
+        if not do_shad:
+            self._shadow_dirty = False
+
+        region=context.region; rv3d=context.region_data
+        center,radius=self._bounds_cache
+        if do_shad:
+            sdist = getattr(vls, 'shadow_distance', 25.0) if vls else 25.0
+            try: cam_pos = tuple(rv3d.view_matrix.inverted().translation)
+            except Exception: cam_pos = (0.0, 0.0, 0.0)
+            vproj = rv3d.window_matrix @ rv3d.view_matrix
+            ls_mat, self._shadow_texel = _build_light_space_fit(
+                sun_dir, vproj, cam_pos, sdist, s_res, radius)
+            # Re-render the shadow map only when the fit changes (view / sun / distance).
+            # Static view -> cached; orbiting -> re-fits. Geometry changes already flag dirty.
+            _key = tuple(round(x, 4) for row in ls_mat for x in row)
+            if _key != getattr(self, '_prev_ls_key', None):
+                self._shadow_dirty = True
+            self._prev_ls_key = _key
+        else:
+            self._shadow_texel = 0.0
+            ls_mat = Matrix.Identity(4)
+            self._prev_ls_key = None
+
+        # Shadows pending -> one redraw so the shadow map re-renders this frame.
+        if self._shadow_dirty and do_shad:
+            self.tag_redraw()
+            try: context.region.tag_redraw()
+            except Exception: pass
+        shad_tex=self._shadow_pass(ls_mat,s_res,depsgraph) if do_shad else self._dummy_depth
+
+        gpu.state.viewport_set(0,0,region.width,region.height)
+        try:
+            fb=gpu.state.active_framebuffer_get()
+            wc=scene.world.color if scene.world else None
+            fb.clear(color=(wc[0],wc[1],wc[2],1.0) if wc else (0.08,0.08,0.08,1.0),depth=1.0)
+        except Exception as e: print(f"[VertexLit] clear: {e}")
+
+        gpu.state.depth_test_set('LESS_EQUAL')
+        gpu.state.depth_mask_set(True)
+        self._cull = 'BACK' if (vls and getattr(vls, 'backface_cull', True)) else 'NONE'
+        gpu.state.face_culling_set(self._cull)
+
+        view_proj=rv3d.window_matrix@rv3d.view_matrix
+        self._film_transparent = False
+        try: self._cam_pos = tuple(rv3d.view_matrix.inverted().translation)
+        except Exception: self._cam_pos = (0.0, 0.0, 0.0)
+        try: self._view_mat3 = rv3d.view_matrix.to_3x3()
+        except Exception: self._view_mat3 = None
+        mode='PIXEL'
+        # Workbench studio key light follows the view (like Blender's Solid mode):
+        # a fixed view-space direction rotated into world space each frame.
+        try:
+            kv=Vector((0.25,0.35,0.90)); kv.normalize()
+            key_dir=tuple(rv3d.view_rotation @ kv)
+        except Exception:
+            key_dir=(0.3,0.4,0.86)
+        studio=(key_dir, (1.0,1.0,1.0), (vls.key_intensity if vls else 0.8))
+        # experimental splat clouds: cache matrices + scene lighting for the draw.
+        # The EWA ellipse projection assumes a PERSPECTIVE view (Jacobian ~ f/z); in an
+        # orthographic viewport the splat sizes would be wrong, so skip splats there
+        # (vm=None makes _draw_splats/_draw_splat_normals early-out) rather than draw them distorted.
+        if getattr(rv3d, 'is_perspective', True):
+            self._splat_vm = rv3d.view_matrix; self._splat_pm = rv3d.window_matrix
+            self._splat_wh = (region.width, region.height)
+        else:
+            self._splat_vm = None; self._splat_pm = None; self._splat_wh = None
+        _sun = getattr(self, '_sun', ((0.0,0.0,1.0),(1.0,1.0,1.0),0.0,1.0))
+        self._splat_light = ({
+            'sky': sky, 'ground': ground, 'hemi': _sun[3],
+            'sun_dir': _sun[0], 'sun_col': _sun[1], 'sun_int': _sun[2],
+            'key_dir': studio[0], 'key_col': studio[1], 'key_int': studio[2],
+        } if (vls is None or getattr(vls, 'splat_lit', True)) else None)
+        # depth pass (M2) only needed to FEED AO; compositing uses the depth TEST in the colour pass.
+        self._splat_need_depth = bool(vls and getattr(vls, 'use_ao', False))
+        self._splat_use_compute = bool(vls and getattr(vls, 'splat_compute', False))
+        self._splat_tile = bool(vls and getattr(vls, "splat_tile", False))
+        self._splat_gpu_sort = bool(vls and getattr(vls, "splat_gpu_sort", True))
+        self._splat_radix = bool(vls and getattr(vls, "splat_radix", True))
+        self._splat_unified = bool(vls and getattr(vls, "splat_unified", True))
+        self._splat_backface = bool(vls and getattr(vls, "splat_backface", False))
+        self._splat_stoch = bool(vls and getattr(vls, "splat_stochastic", True))
+        self._stoch_more = False
+        # collect object-anchored splat clouds (Empties with a vlr_splat_id) + their world matrices,
+        # so each is drawn at its own transform (selectable, movable, Shift+D duplicatable).
+        anchors = []
+        try:
+            from . import splat_render as _sr
+            if _sr.SPLAT_CLOUDS:
+                for ob in depsgraph.objects:
+                    sid = ob.get('vlr_splat_id')
+                    if sid is None or int(sid) not in _sr.SPLAT_CLOUDS:
+                        continue
+                    # visible_get() is unreliable on evaluated Empties (returns False for ones you can
+                    # clearly see), so gate on the ORIGINAL object's explicit hide flags instead and
+                    # DEFAULT TO DRAWING. Only skip when the anchor is genuinely hidden.
+                    hidden = False
+                    try:
+                        orig = ob.original or ob
+                        hidden = bool(orig.hide_viewport) or bool(orig.hide_get())
+                    except Exception:
+                        hidden = False
+                    if hidden:
+                        continue
+                    anchors.append((ob.matrix_world.copy(), int(sid), ob.name))
+        except Exception:
+            pass
+        self._splat_anchors = anchors
+        def _draw_objects():
+            self._draw_batches(depsgraph, vls, view_proj, studio, ls_mat, sky, ground,
+                               bstr, do_shad, s_bias, s_dark, shad_tex, lights, mode)
+            self._draw_splats()
+
+        # Route through the screen-space post pipeline if any effect is enabled;
+        # otherwise draw straight to the viewport (default path, unchanged). Any
+        # failure in the offscreen pipeline falls back to a direct draw.
+        rw, rh = region.width, region.height
+        post = getattr(self, '_post', None)
+        if post is not None:
+            try:
+                proj = rv3d.window_matrix
+                wc = scene.world.color if scene.world else None
+                draw_scene, post_ctx = self._make_post_ctx(
+                    depsgraph, vls, view_proj, rv3d.view_matrix.to_3x3(), proj,
+                    rw, rh, wc, studio, ls_mat, sky, ground, bstr, lights,
+                    do_shad=do_shad, s_bias=s_bias, s_soft=s_dark, shad_tex=shad_tex)
+                self._stoch_view = True          # stochastic splats may use the G-buffer depth
+                try:
+                    final_tex, sw, sh = post.render(rw, rh, draw_scene, post_ctx, vls, blit=False)
+                finally:
+                    self._stoch_view = False
+                    self._prev_view_proj = view_proj.copy()
+                # Blit to the viewport THROUGH the scene's colour management (view transform,
+                # look, exposure, gamma) so the viewport matches the F12 render. Depth/Normal
+                # are data passes, not scene-referred colour -> blit them RAW (no tonemap).
+                gpu.state.depth_test_set('NONE'); gpu.state.depth_mask_set(False)
+                gpu.state.blend_set('NONE')
+                _raw = getattr(vls, 'view_mode', 'TEXTURED') in ('DEPTH', 'NORMAL')
+                if _raw:
+                    draw_texture_2d(final_tex, (0, 0), rw, rh)
+                else:
+                    try:
+                        self.bind_display_space_shader(scene)
+                        draw_texture_2d(final_tex, (0, 0), rw, rh)
+                        self.unbind_display_space_shader()
+                    except Exception:
+                        draw_texture_2d(final_tex, (0, 0), rw, rh)   # fallback: linear
+                gpu.state.face_culling_set('NONE')
+                if (getattr(self, '_mat_pending', False) or getattr(self, '_geo_pending', False)
+                        or getattr(self, '_tex_pending', False) or getattr(self, '_stoch_more', False)
+                        or post_ctx.get('ao_more')):
+                    self.tag_redraw()
+                    try: context.region.tag_redraw()
+                    except Exception: pass
+                return
+            except Exception as e:
+                global _post_err_shown
+                if not _post_err_shown:
+                    _post_err_shown = True
+                    import traceback
+                    print("[VertexLit] post pipeline failed -> direct draw. First-time traceback:")
+                    traceback.print_exc()
+                elif _DEBUG:
+                    print("[VertexLit] post pipeline failed -> direct draw:", e)
+
+        _draw_objects()
+
+        gpu.state.depth_test_set('NONE')
+        gpu.state.face_culling_set('NONE')
+        gpu.state.depth_mask_set(False)
+        # Materials still compiling -> keep redrawing so they upgrade progressively.
+        if getattr(self, '_mat_pending', False) or getattr(self, '_geo_pending', False) or getattr(self, '_tex_pending', False):
+            self.tag_redraw()
+            try: context.region.tag_redraw()
+            except Exception: pass
+
+
+_ENGINE_ID = 'VERTEX_LIT'
+_patched_panels = []
+
+# Workbench panels in the Render tab whose settings this engine ignores. Showing them made the tab
+# look like it had Workbench's shading options (Studio/MatCap, X-Ray, Depth of Field, samples...)
+# and pushed our own panels far down. Film (Transparent is used by F12), Simplify (changes the
+# evaluated geometry), Performance, Color Management and every Output/Object/Material panel stay.
+_HIDDEN_WORKBENCH_PANELS = {
+    'RENDER_PT_opengl_sampling',
+    'RENDER_PT_opengl_lighting',
+    'RENDER_PT_opengl_color',
+    'RENDER_PT_opengl_options',
+    'RENDER_PT_freestyle',
+    'RENDER_PT_gpencil',
+}
+
+def _compat_panels():
+    """Panels a simple non-PBR engine should show: the set Workbench uses
+    (incl. the material selector EEVEE_MATERIAL_PT_context_material) plus the
+    node 'surface' panel so node materials are visible/editable in Properties,
+    minus the Workbench-only render settings in _HIDDEN_WORKBENCH_PANELS."""
+    extra = {'EEVEE_MATERIAL_PT_surface'}
+    out = []
+    for p in bpy.types.Panel.__subclasses__():
+        ce = getattr(p, 'COMPAT_ENGINES', None)
+        if not ce:
+            continue
+        if p.__name__ in _HIDDEN_WORKBENCH_PANELS:
+            continue
+        if 'BLENDER_WORKBENCH' in ce or p.__name__ in extra:
+            out.append(p)
+    return out
+
+def _register_panels():
+    _patched_panels.clear()
+    for p in _compat_panels():
+        try:
+            p.COMPAT_ENGINES.add(_ENGINE_ID)
+            _patched_panels.append(p)
+        except Exception:
+            pass
+
+def _unregister_panels():
+    for p in _patched_panels:
+        try: p.COMPAT_ENGINES.discard(_ENGINE_ID)
+        except Exception: pass
+    _patched_panels.clear()
+
+from bpy.app.handlers import persistent as _persistent
+
+_EDITED_WHILE_AWAY = set()   # object names edited while no Vertex-Lit viewport was running
+
+
+def _vlr_viewport_live():
+    """True if any 3D viewport is currently in Vertex-Lit RENDERED shading."""
+    try:
+        if getattr(bpy.context.scene.render, 'engine', '') != _ENGINE_ID:
+            return False
+        for win in bpy.context.window_manager.windows:
+            for area in win.screen.areas:
+                if area.type != 'VIEW_3D':
+                    continue
+                for sp in area.spaces:
+                    if getattr(sp, 'type', '') == 'VIEW_3D' and \
+                       getattr(getattr(sp, 'shading', None), 'type', '') == 'RENDERED':
+                        return True
+    except Exception:
+        pass
+    return False
+
+
+@_persistent
+def _on_depsgraph_update(scene, depsgraph=None):
+    """Record geometry edits that happen while we are NOT the active engine.
+
+    Blender destroys the RenderEngine when you leave Rendered view, so edits made in Solid view
+    never reach view_update. The (re)entry check can't afford to re-hash every object (0.87s), so
+    instead this always-on handler notes which objects changed; on re-entry only those are
+    re-examined. Cheap: it only records names."""
+    try:
+        # Only record while NO Vertex-Lit rendered viewport exists. Ask Blender directly rather
+        # than using a timer: a 2-second timestamp guard had a blind window -- edit in Rendered,
+        # switch to Solid, edit within 2s, and that edit was never recorded (measured 0/6).
+        if _vlr_viewport_live():
+            return
+        dg = depsgraph if depsgraph is not None else getattr(scene, 'depsgraph', None)
+        if dg is None:
+            return
+        for upd in dg.updates:
+            idd = upd.id
+            if isinstance(idd, bpy.types.Object):
+                if idd.type == 'MESH' and (upd.is_updated_geometry or upd.is_updated_transform):
+                    _EDITED_WHILE_AWAY.add(idd.name)
+                    # also key by its mesh: a scatter SOURCE object is usually not in the scene,
+                    # so the instance path can only ever match on the mesh name.
+                    mn = getattr(getattr(idd, 'data', None), 'name', None)
+                    if mn:
+                        _EDITED_WHILE_AWAY.add('mesh:' + mn)
+            elif isinstance(idd, bpy.types.Mesh) and upd.is_updated_geometry:
+                # mesh datablock edits (edit mode, sculpt, paint) -> every object using it
+                nm = getattr(idd, 'name', None)
+                if nm:
+                    _EDITED_WHILE_AWAY.add('mesh:' + nm)
+            elif isinstance(idd, bpy.types.Material):
+                material_shader.mark_dirty(idd.name)
+            elif isinstance(idd, bpy.types.Image):
+                _invalidate_tex(idd.name)
+    except Exception:
+        pass
+
+
+@_persistent
+def _on_file_load(*args):
+    """New/opened file: drop caches keyed to the previous file's objects + GPU context, so a
+    same-named object from another file can't draw stale geometry, and runtime-only splat clouds
+    don't leak across files."""
+    try: _PERSIST_MESH.clear(); _PERSIST_BATCH.clear(); _PERSIST_SHADOW.clear(); _PERSIST_SIG.clear()
+    except Exception: pass
+    try: _tex_cache.clear()
+    except Exception: pass
+    try: _EDITED_WHILE_AWAY.clear()
+    except Exception: pass
+    try: material_shader.invalidate()
+    except Exception: pass
+    try:
+        from . import splat_render
+        splat_render.SCENE_CLOUDS.clear(); splat_render.SPLAT_CLOUDS.clear()
+    except Exception: pass
+
+def _release_gpu_caches():
+    """Drop module-level GPU objects so leaving/re-entering rendered mode never
+    accumulates stale-context shaders/textures (the 'chuggier each re-enter' leak).
+    Everything is lazily rebuilt on the next draw."""
+    global _shadow_shader
+    _main_shader.clear()
+    instancing.clear()
+    _shadow_shader = None
+    global _id_shader
+    _id_shader = None
+    _tex_cache.clear()
+    # Persistent mesh/batch caches hold GPU batches tied to the (now gone) context.
+    _PERSIST_MESH.clear(); _PERSIST_BATCH.clear(); _PERSIST_SHADOW.clear(); _PERSIST_SIG.clear()
+    try:
+        material_shader.invalidate()   # release compiled per-material programs
+    except Exception:
+        pass
+
+
+def register():
+    bpy.utils.register_class(VertexLitEngine)
+    _register_panels()
+    if _on_file_load not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_on_file_load)
+    if _on_depsgraph_update not in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.append(_on_depsgraph_update)
+
+def unregister():
+    _unregister_panels()
+    _release_gpu_caches()
+    try:
+        if _on_file_load in bpy.app.handlers.load_post:
+            bpy.app.handlers.load_post.remove(_on_file_load)
+        if _on_depsgraph_update in bpy.app.handlers.depsgraph_update_post:
+            bpy.app.handlers.depsgraph_update_post.remove(_on_depsgraph_update)
+    except Exception:
+        pass
+    bpy.utils.unregister_class(VertexLitEngine)
