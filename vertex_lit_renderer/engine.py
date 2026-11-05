@@ -1247,6 +1247,7 @@ class VertexLitEngine(bpy.types.RenderEngine):
         # Do NOT clear the shared shader/program caches here: the viewport GPU
         # context persists across enter/leave, so those stay valid — clearing them
         # only forces an expensive full recompile on every re-entry.
+        self._planar_overlay_cache = {}
         self._dummy_depth = None
         self._white_tex = None
         self._shadow_tex_cache = None
@@ -2212,6 +2213,9 @@ class VertexLitEngine(bpy.types.RenderEngine):
                     transparent.append((d, (prog, mat, batch, tex, model, normal_mat, gmin, gsc, oname, objid)))
                 else:
                     _draw_one(prog, mat, batch, tex, model, normal_mat, gmin, gsc, oname, objid)
+
+        from . import planar_overlay
+        planar_overlay.draw(self, depsgraph, view_proj)
 
         # Transparent pass: farthest first, alpha blend, no depth write (still tested).
         if transparent:
