@@ -245,27 +245,44 @@ def capture(engine, depsgraph, obj):
 _PENDING = []
 
 
+def publish_capture(obj, pixels, projection):
+    """Run outside the draw callback: Blender forbids ID writes during drawing."""
+    h,w=pixels.shape[:2]
+    image=bpy.data.images.new(obj.name+'_PlanarReflection',width=w,height=h,alpha=True,float_buffer=True)
+    try:
+        image.colorspace_settings.name='Non-Color'
+        image.pixels.foreach_set(pixels.reshape(-1));image.update();image.pack()
+    except Exception:
+        bpy.data.images.remove(image);raise
+    obj.vlr_planar.projection=tuple(x for row in projection for x in row)
+    obj.vlr_planar.image=image
+    obj.vlr_planar.status='Baked for '+obj.vlr_planar.camera.name+'; rebake after scene changes'
+
+
 def process_pending(engine, context, depsgraph):
     if not _PENDING or getattr(engine,'_geo_pending',False) or getattr(engine,'_mat_pending',False):return
     obj = _PENDING.pop(0)
+    pixels=projection=None;error=None
     try:
         if obj.name not in context.scene.objects:return
         pixels, projection = capture(engine,depsgraph,obj)
-        h,w=pixels.shape[:2]
-        image=bpy.data.images.new(obj.name+'_PlanarReflection',width=w,height=h,alpha=True,float_buffer=True)
-        try:
-            image.colorspace_settings.name='Non-Color'
-            image.pixels.foreach_set(pixels.reshape(-1));image.update();image.pack()
-        except Exception:
-            bpy.data.images.remove(image);raise
-        obj.vlr_planar.projection=tuple(x for row in projection for x in row)
-        obj.vlr_planar.image=image
-        obj.vlr_planar.status='Baked for '+obj.vlr_planar.camera.name+'; rebake after scene changes'
-        engine.tag_redraw()
     except Exception as exc:
-        try:obj.vlr_planar.status='Bake failed: '+str(exc)
-        except ReferenceError:pass
-        print('[VertexLit] planar bake failed:',exc)
+        error=str(exc)
+    # A clear/reconfigure between capture and publication must cancel publication.
+    token=(obj.vlr_planar.faces,obj.vlr_planar.topology,obj.vlr_planar.camera)
+    def finish():
+        try:
+            state=obj.vlr_planar
+            if token!=(state.faces,state.topology,state.camera) or not state.faces:return
+            if error is not None:raise RuntimeError(error)
+            publish_capture(obj,pixels,projection)
+        except ReferenceError:return
+        except Exception as exc:
+            obj.vlr_planar.status='Bake failed: '+str(exc)
+            print('[VertexLit] planar bake failed:',exc)
+        for window in bpy.context.window_manager.windows:
+            for area in window.screen.areas:area.tag_redraw()
+    bpy.app.timers.register(finish,first_interval=0.01)
 
 
 class VLR_OT_planar_bake(bpy.types.Operator):
