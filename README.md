@@ -24,8 +24,8 @@ This is a fixed-camera, single-plane bake per object. Rebake after camera, geome
 
 - Material graphs are translated to GLSL; support is incomplete and results can differ from Cycles or Eevee.
 - Partial-alpha sRGB image colors have a known mismatch against Cycles.
-- High-resolution final renders currently create Python pixel lists, increasing memory use. Array/bulk transfer alternatives passed a small API test but are not implemented in this release.
-- Some GPU draw failure paths may leave incomplete final renders; this is under investigation.
+- The published v0.18.1 beta uses Python pixel lists for final renders. The pending audit branch replaces this with bulk pixel transfer to reduce allocation overhead.
+- The pending audit branch propagates main object draw failures to the final-render error handler; broader GPU recovery remains experimental.
 
 ## Development
 

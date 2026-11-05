@@ -1220,8 +1220,9 @@ class VertexLitEngine(bpy.types.RenderEngine):
 
             # Blender offsets this result into the border (or crops the final image).
             # Keep full-frame projection/effects, but submit only the selected pixels.
-            rl.rect = np.ascontiguousarray(arr[y0:y0+rh, x0:x0+rw]).reshape(-1, 4) if arr is not None else \
-                [[0.0, 0.0, 0.0, 1.0]] * (rw * rh)
+            if arr is None:
+                raise RuntimeError('Render produced no pixel buffer')
+            rl.rect.foreach_set(np.ascontiguousarray(arr[y0:y0+rh, x0:x0+rw]).reshape(-1))
             self.end_result(result)
             result = None
         except Exception as e:
@@ -2159,7 +2160,7 @@ class VertexLitEngine(bpy.types.RenderEngine):
                     if chunks is None: batch.draw(sh)
                     else: instancing.draw(batch, sh, chunks)
                 except Exception:
-                    if getattr(self, '_strict_capture', False):
+                    if getattr(self, '_strict_capture', False) or getattr(self, '_final_render', False):
                         raise
                     self._batch_dict.pop(oname, None); self._dirty_objects.add(oname); self._dirty=True
             else:
@@ -2181,7 +2182,7 @@ class VertexLitEngine(bpy.types.RenderEngine):
                     if chunks is None: batch.draw(sh)
                     else: instancing.draw(batch, sh, chunks)
                 except Exception:
-                    if getattr(self, '_strict_capture', False):
+                    if getattr(self, '_strict_capture', False) or getattr(self, '_final_render', False):
                         raise
                     self._batch_dict.pop(oname, None); self._dirty_objects.add(oname); self._dirty=True
 

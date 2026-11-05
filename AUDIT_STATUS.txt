@@ -11,3 +11,23 @@ Pending starting commit: 9fa5d6c
 
 Current goal: continue reproducible correctness, material, viewport, render,
 and resource-lifecycle audits; keep test evidence and findings on this branch.
+
+Completed audit findings:
+- Deleted queued objects no longer throw out of viewport drawing.
+- File replacement/unregister cancels pending work and invalidates callbacks.
+- Unsupported post-bake material graphs skip only their overlay, cache failure,
+  and recover after graph repair.
+- Final object draw failures propagate to the render error handler.
+- Bulk rect.foreach_set supersedes direct NumPy assignment for final pixels.
+
+Validation: GPU overlay/material-edit recovery, unchanged-mesh cache reuse,
+object isolation, clear/rebake cleanup, saved-image/F12 workflow, queue lifecycle,
+injected final draw failure, mirrored objects/instances, render borders/crops,
+and eight pixel-identical regression captures. Installed runtime matches release.
+
+Measured 1024x1024 transfer under tracemalloc: lists 4.146 s / 208 MiB Python
+peak; direct array 7.026 s / 16 MiB; bulk 0.000744 s / negligible Python peak.
+Single instrumented measurement, not whole-render speed or GPU memory usage.
+Remaining limits: camera-specific manual bakes, approximate roughness filter,
+incomplete graph support, known partial-alpha sRGB discrepancy, and untested
+GPU/device-specific failures. Preserve all commits for next requested push.
