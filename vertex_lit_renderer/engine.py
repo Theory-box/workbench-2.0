@@ -409,13 +409,14 @@ class _RangeDraw:
     def instanced_batch(self):
         if self._instanced is None:
             vbo, vbo2, indices = self._geometry
-            if self.start == 0 and self.count == indices.size:
+            if indices is None or (self.start == 0 and self.count == indices.size):
                 self._instanced = self.batch
             else:
                 ibo = gpu.types.GPUIndexBuf(type='TRIS',
                     seq=indices.reshape(-1)[self.start:self.start+self.count].reshape(-1, 3))
                 self._instanced = gpu.types.GPUBatch(type='TRIS', buf=vbo, elem=ibo)
                 self._instanced.vertbuf_add(vbo2)
+            self._geometry = None  # index data is no longer needed after upload
         return self._instanced
 
 
@@ -640,7 +641,7 @@ def _extract_geometry(obj, depsgraph, mesh=None, attr_name=""):
         ibo = gpu.types.GPUIndexBuf(type='TRIS', seq=idx)
         batch = gpu.types.GPUBatch(type='TRIS', buf=vbo, elem=ibo)
         batch.vertbuf_add(vbo2)
-        slots_list = [[_RangeDraw(batch, st, cnt, (vbo, vbo2, idx)), nm, None] for (k, st, cnt), nm in zip(ranges, names)]
+        slots_list = [[_RangeDraw(batch, st, cnt, (vbo, vbo2, None if st == 0 and cnt == idx.size else idx)), nm, None] for (k, st, cnt), nm in zip(ranges, names)]
 
         _tp = _prof('gpu_build', _tp)
         vt = np.ascontiguousarray(np.asarray(vc).T)
@@ -650,11 +651,11 @@ def _extract_geometry(obj, depsgraph, mesh=None, attr_name=""):
                      1.0/float(size[1]) if size[1] > 1e-9 else 0.0,
                      1.0/float(size[2]) if size[2] > 1e-9 else 0.0)
         _tp = _prof('bbox', _tp)
-        data = dict(material_state=_material_state(obj), slots_list=slots_list, ranges=ranges, pos=pos, idx=idx, batch=batch,
+        data = dict(material_state=_material_state(obj), slots_list=slots_list, ranges=ranges, batch=batch,
                     vbo=vbo, vbo2=vbo2, ibo=ibo, n_loops=n_loops, n_tris=n_tris,
                     gen_min=gen_min, gen_scale=gen_scale)
         if _KEEP_CPU_ARRAYS:
-            data.update(nrm=np.array(nrm, dtype=np.float32), uv=np.array(uv, dtype=np.float32),
+            data.update(pos=pos, idx=idx, nrm=np.array(nrm, dtype=np.float32), uv=np.array(uv, dtype=np.float32),
                         col=np.array(col, dtype=np.float32))
         return data
     except Exception as e:

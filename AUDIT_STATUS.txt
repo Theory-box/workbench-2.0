@@ -31,3 +31,11 @@ Single instrumented measurement, not whole-render speed or GPU memory usage.
 Remaining limits: camera-specific manual bakes, approximate roughness filter,
 incomplete graph support, known partial-alpha sRGB discrepancy, and untested
 GPU/device-specific failures. Preserve all commits for next requested push.
+
+Geometry-memory pass: a 327680-triangle single-material mesh retained 15 MiB
+of redundant NumPy positions/indices after upload; now retains zero payload
+for these arrays. GPU layout estimate remains 48.75 MiB. Multi-material index
+arrays stay available until all relevant instanced batches have uploaded.
+Diagnostic VLR_KEEP_CPU_ARRAYS mode retains arrays intentionally. Legacy
+geometry extraction remains unchanged. Eight images and planar workflow pass.
+This counts owned arrays, not total Blender RSS or measured driver VRAM.
