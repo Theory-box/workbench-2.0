@@ -95,7 +95,10 @@ def configured_faces(obj):
 def clear_reflection(obj):
     """Detach only this object's bake; never delete possibly shared image data."""
     state = obj.vlr_planar
+    old = state.image
     state.image = None
+    if old is not None and old.get('vlr_planar_owned',False) and old.users == 0:
+        bpy.data.images.remove(old)
     state.camera = None
     state.faces = ''
     state.topology = ''
@@ -250,12 +253,16 @@ def publish_capture(obj, pixels, projection):
     h,w=pixels.shape[:2]
     image=bpy.data.images.new(obj.name+'_PlanarReflection',width=w,height=h,alpha=True,float_buffer=True)
     try:
+        image['vlr_planar_owned']=True
         image.colorspace_settings.name='Non-Color'
         image.pixels.foreach_set(pixels.reshape(-1));image.update();image.pack()
     except Exception:
         bpy.data.images.remove(image);raise
     obj.vlr_planar.projection=tuple(x for row in projection for x in row)
+    old=obj.vlr_planar.image
     obj.vlr_planar.image=image
+    if old is not None and old.get('vlr_planar_owned',False) and old.users == 0:
+        bpy.data.images.remove(old)
     obj.vlr_planar.status='Baked for '+obj.vlr_planar.camera.name+'; rebake after scene changes'
 
 

@@ -65,8 +65,27 @@ def draw(self,context,dg):
       overlay=np.array(buf).reshape(256,256,4)
       assert overlay[:,:,0].max()>.1,'Overlay has no reflected red object'
       np.save(root.parent/'work'/'planar-overlay.npy',overlay)
+      rough_image=bpy.data.images.new('RoughMap',width=4,height=4,float_buffer=True)
+      rough_image.colorspace_settings.name='Non-Color'
+      rough_image.pixels.foreach_set(np.ones(64,dtype=np.float32));rough_image.update()
+      node=mirror_mat.node_tree.nodes.new('ShaderNodeTexImage');node.image=rough_image
+      mirror_mat.node_tree.links.new(node.outputs['Color'],mirror_mat.node_tree.nodes.get('Principled BSDF').inputs['Roughness'])
+      bpy.context.view_layer.update()
+      fb.clear(color=(0,0,0,1),depth=1)
+      planar_overlay.draw(self,bpy.context.evaluated_depsgraph_get(),projection@view)
+      buf=fb.read_color(0,0,256,256,4,0,'FLOAT');buf.dimensions=256*256*4
+      rough=np.array(buf).reshape(256,256,4)
+      assert np.max(np.abs(rough-overlay))>.02,'Roughness map has no visible effect'
+      np.save(root.parent/'work'/'planar-overlay-rough.npy',rough)
+
     finally:target.free()
+    # Repeated successful publication must release the previous owned image.
+    oldname=mirror.vlr_planar.image.name
+    planar.publish_capture(mirror,pixels,vp)
+    assert bpy.data.images.get(oldname) is None
+    newname=mirror.vlr_planar.image.name
     planar.clear_reflection(mirror)
+    assert bpy.data.images.get(newname) is None
     assert mirror.vlr_planar.image is None
     np.save(root.parent/'work'/'planar-capture.npy',pixels)
     result={'pass':True,'red_pixels':int(red.sum()),'geometry_cache_reused':True,'state_restored':True}
