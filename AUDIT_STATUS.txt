@@ -56,8 +56,8 @@ Sun-shadow audit (2026-11-04; branch only):
 - Orthographic shadow fitting incorrectly pulled far corners toward the camera
   origin. Parallel rays now retain their lateral offsets. Half-texel padding
   prevents centre snapping from excluding an otherwise covered frustum corner.
-- Controlled exterior/material tests did not reproduce the reported opaque
-  black surfaces. This report does NOT claim that user-visible issue is fixed.
+- The initial controlled tests did not reproduce the black exterior surfaces.
+  The subsequent saved-scene investigation below reproduced and fixed them.
 - Coverage: viewport warm/cold changes, scene lights, sun settings and limits,
   mirrored instances, F12 borders/crops, reflection-capture shadow-state isolation,
   textured instancing versus individual draws, and ambient-fill preservation.
@@ -66,3 +66,16 @@ Sun-shadow audit (2026-11-04; branch only):
 - No installation, publication, main merge, or release. Preserve this work for
   the next requested push. Detailed evidence: outputs/workbench-sun-shadow-audit.json
   in the parent workspace; repeatable tests are included under tests/test_sun_shadow_*.
+
+Black exterior shadow follow-up (2026-11-04):
+Reproduced in Azola Mezzo November 2026 v2 testing.blend, frame 9. The shader
+cache treated texture-unit bindings like per-program uniform values. Switching
+between regular/instanced material shaders could overwrite a cached shader's
+shadow-map binding, causing a material texture to be sampled as shadow depth.
+Rebind uShadowMap when returning to an initialized program. Keep matrix/scalar
+uniform caching. Also invalidate tracked shader state after planar overlays.
+The targeted fix matches the full-uniform-rebinding reference pixel for pixel
+in the actual scene at 480x270. A small mixed regular/instanced regression
+reproduces 6220 incorrect pixels in the old path and zero error with the fix.
+Evidence: parent outputs/workbench-black-shadow-fix.json and before/after PNG.
+The saved user scene and installed add-on remain unchanged; no push or release.

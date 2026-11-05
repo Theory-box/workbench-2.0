@@ -2081,6 +2081,12 @@ class VertexLitEngine(bpy.types.RenderEngine):
             if last_shader[0] is not sh:
                 sh.bind()
                 last_shader[0] = sh
+                # Uniform values belong to a program, but texture-unit bindings
+                # are shared GPU state. Another material may have overwritten
+                # this program's shadow-map unit since its previous draw.
+                if id(sh) in frame_done:
+                    try: sh.uniform_sampler('uShadowMap', shad_tex)
+                    except ValueError: pass  # studio programs have no shadow map
             if id(sh) not in frame_done:
                 self._apply_frame_uniforms(sh, view_proj, ls_mat, sky, ground, bstr,
                                            do_shad, s_bias, s_dark, shad_tex, lights, studio)
@@ -2230,6 +2236,8 @@ class VertexLitEngine(bpy.types.RenderEngine):
 
         from . import planar_overlay
         planar_overlay.draw(self, depsgraph, view_proj)
+        # The overlay binds its own programs/textures outside _ensure_frame.
+        last_shader[0] = None
 
         # Transparent pass: farthest first, alpha blend, no depth write (still tested).
         if transparent:
