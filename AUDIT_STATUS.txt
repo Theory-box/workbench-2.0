@@ -39,3 +39,13 @@ arrays stay available until all relevant instanced batches have uploaded.
 Diagnostic VLR_KEEP_CPU_ARRAYS mode retains arrays intentionally. Legacy
 geometry extraction remains unchanged. Eight images and planar workflow pass.
 This counts owned arrays, not total Blender RSS or measured driver VRAM.
+
+Process memory measurement, house scene (46 objects), RTX 4090, 2842x1226:
+Installed 1.5x SS + 4096 shadows + AO/cavity/outline/FXAA added about 13 MiB
+resident RAM and 660 MiB dedicated GPU allocation versus Solid view.
+1x SS alone reduced GPU delta to 296 MiB; all those effects off reduced it
+to 37 MiB. Returning to Solid released most of the GPU increase.
+Audit branch's CPU geometry savings were not distinguishable from run-to-run
+variation in this house scene. Three samples/configuration, one fresh process;
+Windows allocation counters, not peak or physical VRAM residency. No user
+settings, installed files, or main/release changes were made for measurement.
