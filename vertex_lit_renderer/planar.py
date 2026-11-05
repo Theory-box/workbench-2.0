@@ -127,3 +127,31 @@ def register():
 def unregister():
     del bpy.types.Object.vlr_planar
     bpy.utils.unregister_class(VLRPlanarSettings)
+
+
+def reflected_camera(camera_world, projection, point, normal, clip_bias=0.001):
+    """Return reflected view and oblique projection retaining the viewer's side.
+
+    OpenGL clip convention: -w <= z <= w. Works with perspective and
+    orthographic projections by deriving the opposite clip corner via inverse P.
+    """
+    point, n = Vector(point), Vector(normal).normalized()
+    if n.length_squared < 1e-12:
+        raise ValueError('Invalid plane normal')
+    distance = (camera_world.translation-point).dot(n)
+    if abs(distance) <= clip_bias:
+        raise ValueError('Camera lies on the reflection plane')
+    if distance < 0:
+        n.negate()
+    view = (reflection_matrix(point, n) @ camera_world).inverted()
+    # Positive plane half-space is the original viewer's side.
+    world_plane = Vector((*n, -n.dot(point)-clip_bias))
+    camera_plane = view.inverted().transposed() @ world_plane
+    def sign(x): return 1.0 if x >= 0 else -1.0
+    corner = projection.inverted() @ Vector((sign(camera_plane.x), sign(camera_plane.y), 1, 1))
+    denominator = camera_plane.dot(corner)
+    if denominator <= 1e-8:
+        raise ValueError('Reflection plane is outside the camera capture range')
+    clipped = projection.copy()
+    clipped[2] = camera_plane * (2.0/denominator) - projection[3]
+    return view, clipped
