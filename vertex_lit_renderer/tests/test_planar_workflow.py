@@ -6,7 +6,7 @@ from vertex_lit_renderer import engine,planar
 addon.register()
 bpy.ops.object.select_all(action='SELECT');bpy.ops.object.delete(use_global=False)
 sc=bpy.context.scene;sc.render.engine='VERTEX_LIT';sc.render.resolution_x=256;sc.render.resolution_y=256
-sc.vertex_lit.use_shadows=False;sc.vertex_lit.use_ao=False
+sc.vertex_lit.use_shadows=True;sc.vertex_lit.use_ao=True;sc.vertex_lit.use_outline=True
 bpy.ops.mesh.primitive_plane_add(size=6);mirror=bpy.context.object
 bpy.ops.mesh.primitive_cube_add(size=1,location=(0,0,1));cube=bpy.context.object
 mat=bpy.data.materials.new('Red');mat.use_nodes=True;mat.node_tree.nodes.get('Principled BSDF').inputs['Base Color'].default_value=(1,.01,.01,1);cube.data.materials.append(mat)
@@ -50,6 +50,12 @@ def tick():
    bpy.context.view_layer.objects.active=ob
    assert bpy.ops.vertex_lit.planar_clear()=={'FINISHED'}
    assert ob.vlr_planar.image is None
+   sc.render.filepath=str(root.parent/'work'/'planar-cleared.exr')
+   bpy.ops.render.render(write_still=True)
+   clean=bpy.data.images.load(sc.render.filepath,check_existing=False)
+   b=np.asarray(clean.pixels[:],dtype=np.float32).reshape(256,256,4)
+   assert np.max(np.abs(a-b))>.1,'F12 reflection did not change after Clear'
+
    out.write_text(json.dumps({'pass':True,'operators':True,'save_reopen':True,'f12':True}))
    bpy.ops.wm.quit_blender();return
   return .3

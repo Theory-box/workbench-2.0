@@ -13,10 +13,13 @@ in vec3 vObjPos;
 uniform sampler2D uReflection;
 uniform mat4 uReflectionProjection;
 uniform vec3 uViewer;
-out vec4 fragColor;
+layout(location=0) out vec4 fragColor;
+layout(location=1) out vec4 keepNormal;
+layout(location=2) out vec4 keepId;
 '''
 _MAIN = '''
 void main(){
+ keepNormal=vec4(0);keepId=vec4(0);
  vec4 projected=uReflectionProjection*vec4(vWpos,1.0);
  if(projected.w<=0.0)discard;
  vec2 uv=projected.xy/projected.w*.5+.5;
@@ -52,6 +55,7 @@ def draw(engine,depsgraph,view_projection):
         for obj in depsgraph.scene.objects:
             state=getattr(obj,'vlr_planar',None)
             if obj.type!='MESH' or state is None or state.image is None:continue
+            if obj.name not in getattr(engine,'_normal_records',{}):continue
             data=engine._mesh_cache.get(obj.name)
             if not data or 'vbo2' not in data:continue
             try:faces=set(planar.configured_faces(obj))
