@@ -2157,6 +2157,8 @@ class VertexLitEngine(bpy.types.RenderEngine):
                     if chunks is None: batch.draw(sh)
                     else: instancing.draw(batch, sh, chunks)
                 except Exception:
+                    if getattr(self, '_strict_capture', False):
+                        raise
                     self._batch_dict.pop(oname, None); self._dirty_objects.add(oname); self._dirty=True
             else:
                 sh = instance_shader if instance_shader is not None else legacy
@@ -2177,6 +2179,8 @@ class VertexLitEngine(bpy.types.RenderEngine):
                     if chunks is None: batch.draw(sh)
                     else: instancing.draw(batch, sh, chunks)
                 except Exception:
+                    if getattr(self, '_strict_capture', False):
+                        raise
                     self._batch_dict.pop(oname, None); self._dirty_objects.add(oname); self._dirty=True
 
         for group in self._visible_draw_groups(view_proj):

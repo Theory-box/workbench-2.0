@@ -155,3 +155,86 @@ def reflected_camera(camera_world, projection, point, normal, clip_bias=0.001):
     clipped = projection.copy()
     clipped[2] = camera_plane * (2.0/denominator) - projection[3]
     return view, clipped
+
+
+def capture(engine, depsgraph, obj):
+    """Capture from an owning renderer's GPU context, reusing its scene batches.
+
+    Does not create a Blender scene, camera object, or second geometry cache.
+    Image publication is separate so a failed bake cannot replace a valid image.
+    """
+    import gpu
+    import numpy as np
+    from . import engine as render
+    state = obj.vlr_planar
+    faces = configured_faces(obj)
+    point, normal = plane_from_faces(obj.data, obj.matrix_world, faces)
+    scene = depsgraph.scene
+    camera = state.camera
+    if camera is None:
+        raise ValueError('The bake camera was removed')
+    camera = camera.evaluated_get(depsgraph)
+    settings = scene.vertex_lit
+    aspect = (scene.render.resolution_x * scene.render.pixel_aspect_x /
+              max(1, scene.render.resolution_y * scene.render.pixel_aspect_y))
+    width = state.resolution
+    height = max(1, round(width/aspect))
+    if height > 4096:
+        width = max(1, round(4096*aspect)); height = 4096
+    projection = camera.calc_matrix_camera(depsgraph, x=width, y=height)
+    view, clipped = reflected_camera(camera.matrix_world, projection, point, normal)
+    vp = clipped @ view
+    names = ('_strict_capture','_final_render','_cull','_cam_pos','_view_mat3','_aux_active',
+             '_film_transparent','_sun','_shadow_texel','_shadow_dirty','_shadow_tex_cache')
+    absent = object()
+    saved = {name:getattr(engine,name,absent) for name in names}
+    viewport = gpu.state.viewport_get()
+    depth = gpu.state.depth_test_get(); mask = gpu.state.depth_mask_get()
+    blend = gpu.state.blend_get()
+    target = None
+    try:
+        engine._strict_capture = True
+        engine._final_render = True  # finish material compilation for this capture
+        engine._cull = 'FRONT' if settings.backface_cull else 'NONE'
+        engine._cam_pos = tuple(view.inverted().translation)
+        engine._view_mat3 = view.to_3x3()
+        engine._aux_active = False; engine._film_transparent = False
+        engine._sun = render._compute_sun(settings)
+        sky, ground = tuple(settings.sky_color), tuple(settings.ground_color)
+        key = Vector((.25,.35,.90)).normalized()
+        studio = (tuple(camera.matrix_world.to_quaternion() @ key), (1,1,1), settings.key_intensity)
+        do_shadow = settings.use_shadows and engine._sun[2] > 0
+        light_matrix = Matrix.Identity(4); shadow = engine._dummy_depth
+        engine._shadow_texel = 0
+        if do_shadow:
+            light_matrix, engine._shadow_texel = render._build_light_space_fit(
+                engine._sun[0], vp, engine._cam_pos, settings.shadow_distance,
+                int(settings.shadow_resolution), engine._bounds_cache[1])
+            shadow_target = render._ShadowMap(int(settings.shadow_resolution))
+            engine._shadow_dirty = True
+            # Shadow winding is independent of the reflected viewing camera.
+            engine._cull = 'BACK' if settings.backface_cull else 'NONE'
+            shadow = engine._shadow_pass(light_matrix, int(settings.shadow_resolution), depsgraph,
+                                         shadow_map=shadow_target)
+            engine._cull = 'FRONT' if settings.backface_cull else 'NONE'
+        target = gpu.types.GPUOffScreen(width, height, format='RGBA16F')
+        with target.bind():
+            gpu.state.viewport_set(0,0,width,height)
+            fb = gpu.state.active_framebuffer_get()
+            fb.clear(color=(0,0,0,1),depth=1)
+            engine._draw_batches(depsgraph,settings,vp,studio,light_matrix,sky,ground,0,
+                do_shadow,settings.shadow_bias,settings.shadow_softness,shadow,
+                engine._lights_cache,'PIXEL')
+            buf = fb.read_color(0,0,width,height,4,0,'FLOAT')
+            buf.dimensions=width*height*4
+            pixels=np.array(buf,dtype=np.float32).reshape(height,width,4)
+        return pixels, vp
+    finally:
+        if target is not None: target.free()
+        for name,value in saved.items():
+            if value is absent:
+                if hasattr(engine,name): delattr(engine,name)
+            else: setattr(engine,name,value)
+        gpu.state.viewport_set(*viewport)
+        gpu.state.depth_test_set(depth); gpu.state.depth_mask_set(mask); gpu.state.blend_set(blend)
+        gpu.state.face_culling_set(getattr(engine,'_cull','NONE'))
