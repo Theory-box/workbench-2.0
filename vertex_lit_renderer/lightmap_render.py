@@ -42,11 +42,16 @@ def prepare(engine, depsgraph, obj, prog, mode, drawable):
     geometry_key = (id(data['vbo']), state.uv_name)
     geometry = engine._lightmap_geometry.get(geometry_key)
     if geometry is None:
-        mesh = obj.evaluated_get(depsgraph).data
-        uv = mesh.uv_layers.get(state.uv_name)
-        if uv is None or len(uv.data) != data['n_loops']: return None
-        coords = np.empty(len(uv.data) * 2, dtype=np.float32)
-        uv.data.foreach_get('uv', coords)
+        evaluated = obj.evaluated_get(depsgraph)
+        editing = obj.data.is_editmode
+        mesh = evaluated.to_mesh() if editing else evaluated.data
+        try:
+            uv = mesh.uv_layers.get(state.uv_name)
+            if uv is None or len(uv.data) != data['n_loops']: return None
+            coords = np.empty(len(uv.data) * 2, dtype=np.float32)
+            uv.data.foreach_get('uv', coords)
+        finally:
+            if editing: evaluated.to_mesh_clear()
         fmt = gpu.types.GPUVertFormat()
         fmt.attr_add(id='lightmapUV', comp_type='F32', len=2, fetch_mode='FLOAT')
         vbo = gpu.types.GPUVertBuf(fmt, data['n_loops'])

@@ -480,6 +480,15 @@ def _extract_geometry(obj, depsgraph, mesh=None, attr_name=""):
     """Read the evaluated mesh and upload it ONCE. Returns a cache dict whose 'slots_list' holds one
     [drawable, material_name, texture] entry per material (texture filled later by streaming), or
     None. Falls back to the legacy per-slot path on Blender builds without draw_range/vertbuf_add."""
+    # Edit-mode evaluated data can expose empty/stale Mesh arrays: its live
+    # geometry is stored in BMesh. Materialize it only while editing.
+    if mesh is None and getattr(obj.data, 'is_editmode', False):
+        evaluated = obj.evaluated_get(depsgraph)
+        temporary = evaluated.to_mesh()
+        try:
+            return _extract_geometry(obj, depsgraph, mesh=temporary, attr_name=attr_name)
+        finally:
+            evaluated.to_mesh_clear()
     if not _GEO_FAST_OK:
         data = _extract_mesh_data(obj, depsgraph, mesh=mesh, attr_name=attr_name)
         if data:
@@ -1332,7 +1341,7 @@ class VertexLitEngine(bpy.types.RenderEngine):
                 if update.is_updated_geometry and getattr(id_data, 'users', 0) > 0:
                     for nm in self._mesh_cache:
                         ob = bpy.data.objects.get(nm)
-                        if ob is not None and getattr(ob, 'data', None) is id_data:
+                        if ob is not None and getattr(ob, 'data', None) is id_data.original:
                             self._dirty_objects.add(nm)
                     self._dirty = True; self._shadow_dirty = True; changed = True
             elif isinstance(id_data, bpy.types.Material):
