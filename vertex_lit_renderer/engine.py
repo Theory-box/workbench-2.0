@@ -178,7 +178,7 @@ def _geo_sig(obj, mesh, attr_name=''):
         if mi is not None: h ^= _np_hash(mi) * 3
         sh = _attr_array(mesh, 'sharp_face', np.bool_, 1, npoly)
         if sh is not None: h ^= _np_hash(sh.view(np.uint8)) * 5
-        uvl = mesh.uv_layers.active
+        uvl = next((layer for layer in mesh.uv_layers if layer.active_render), mesh.uv_layers.active)
         if uvl is not None and nl:
             uv = _attr_array(mesh, uvl.name, np.float32, 2, nl)
             if uv is None:
@@ -570,7 +570,7 @@ def _extract_geometry(obj, depsgraph, mesh=None, attr_name=""):
             nrm = vn.reshape(n_verts, 3)[cv]
         _tp = _prof('normals', _tp)
 
-        uv_layer = mesh.uv_layers.active
+        uv_layer = next((layer for layer in mesh.uv_layers if layer.active_render), mesh.uv_layers.active)
         if uv_layer:
             uv = _raw_attr(mesh, uv_layer.name, _ct.c_float, 2, n_loops)
             if uv is None:
@@ -933,7 +933,7 @@ def _extract_mesh_data(obj, depsgraph, mesh=None, attr_name=""):
         vert_co_local = vc.copy()   # stored in cache -> must not alias Blender memory
 
         # --- UVs: raw from the active UV attribute, with fallback ---
-        uv_layer = mesh.uv_layers.active
+        uv_layer = next((layer for layer in mesh.uv_layers if layer.active_render), mesh.uv_layers.active)
         if uv_layer:
             uv = _raw_attr(mesh, uv_layer.name, _ct.c_float, 2, n_loops)
             if uv is None:

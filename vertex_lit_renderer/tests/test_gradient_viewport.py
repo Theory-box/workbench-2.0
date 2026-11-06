@@ -45,9 +45,13 @@ def begin():
  bpy.ops.mesh.primitive_plane_add();bpy.context.object.name='UV Test'
  m=bpy.data.materials.new('UV gradient');m.use_nodes=True;bpy.context.object.data.materials.append(m)
  t=m.node_tree;tc=t.nodes.new('ShaderNodeUVMap');g=t.nodes.new('ShaderNodeTexGradient');vm=t.nodes.new('ShaderNodeVectorMath');vm.operation='SCALE';vm.inputs['Scale'].default_value=.25
- t.links.new(tc.outputs['UV'],vm.inputs[0]);t.links.new(vm.outputs['Vector'],g.inputs['Vector']);t.links.new(g.outputs['Fac'],t.nodes.get('Principled BSDF').inputs['Base Color'])
+ t.links.new(tc.outputs['UV'],vm.inputs[0]);t.links.new(vm.outputs['Vector'],g.inputs['Vector']);t.links.new(g.outputs['Color'],t.nodes.get('Principled BSDF').inputs['Base Color'])
+ primary=bpy.context.object.data.uv_layers.active
+ secondary=bpy.context.object.data.uv_layers.new(name='Editing UV')
+ for item in secondary.data:item.uv*=10
+ bpy.context.object.data.uv_layers.active=secondary;primary.active_render=True
  bpy.context.scene.render.engine='VERTEX_LIT'
- bpy.ops.wm.save_as_mainfile(filepath=str(repo.parent/'outputs/uv-scale-gradient-test.blend'))
+
  for a in bpy.context.screen.areas:
   if a.type=='VIEW_3D':a.spaces.active.shading.type='RENDERED'
  bpy.app.timers.register(pump,first_interval=.2)
