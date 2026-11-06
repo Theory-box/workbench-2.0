@@ -934,13 +934,13 @@ class _Transpiler:
             "EASING":           "clamp({v}p.x,0.0,1.0)*clamp({v}p.x,0.0,1.0)*(3.0-2.0*clamp({v}p.x,0.0,1.0))",
             "DIAGONAL":         "({v}p.x+{v}p.y)*0.5",
             "RADIAL":           "atan({v}p.y,{v}p.x)/(2.0*3.14159265)+0.5",
-            "SPHERICAL":        "max(1.0-length({v}p),0.0)",
-            "QUADRATIC_SPHERE": "max(1.0-length({v}p),0.0)*max(1.0-length({v}p),0.0)",
+            "SPHERICAL":        "max(0.999999-length({v}p),0.0)",
+            "QUADRATIC_SPHERE": "max(0.999999-length({v}p),0.0)*max(0.999999-length({v}p),0.0)",
         }.get(gt, "{v}p.x").format(v=v)
-        self._line("float {v}f = {e};".format(v=v, e=expr))
+        self._line("float {v}f = clamp({e}, 0.0, 1.0);".format(v=v, e=expr))
         self._var_type[v + "f"] = "float"
         if out.name == "Color":
-            return "vec4(vec3(max({v}f,0.0)), 1.0)".format(v=v)
+            return "vec4(vec3({v}f), 1.0)".format(v=v)
         return v + "f"
 
     def _n_tex_voronoi(self, node, out):
