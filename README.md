@@ -6,7 +6,15 @@ Experimental Blender renderer with live material-node previews, shadows, and scr
 
 ## Status
 
-Current version: **0.19.2 beta**. Development and recent tests use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum; other versions have not been verified in this testing pass.
+Current version: **0.19.3 beta**. Development and recent tests use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum; other versions have not been verified in this testing pass.
+
+## Changes in 0.19.3 beta
+
+- Fix the shared shader compile error that prevented Solid, Random, Attribute, Normal, and Depth modes from drawing.
+- Initialize auxiliary coverage and object IDs for outline/cavity effects in non-textured modes.
+- Report final-render view-mode draw failures instead of silently hiding them.
+
+All six modes were checked in the live viewport and F12, including repeated switching back to Solid. This retains the Edit Mode and empty-geometry fixes from 0.19.2.
 
 ## Changes in 0.19.2 beta
 
