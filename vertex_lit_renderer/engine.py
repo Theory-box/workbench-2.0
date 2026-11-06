@@ -2024,6 +2024,7 @@ class VertexLitEngine(bpy.types.RenderEngine):
         sh = _get_viewmode_shader(); sh.bind()
         self._apply_frame_uniforms(sh, view_proj, ls_mat, sky, ground, bstr,
                                    False, 0.005, 0.25, self._dummy_depth, lights, studio)
+        self._aux_frame_uniforms(sh)
         vmid = _VIEWMODE_ID.get(view_mode, 1)
         rand_mode = getattr(vls, 'random_mode', 'OBJECT') if vls else 'OBJECT'
         def sf(n, v):
@@ -2055,11 +2056,16 @@ class VertexLitEngine(bpy.types.RenderEngine):
             sf('uViewMat3', vm3)
         gpu.state.depth_test_set('LESS_EQUAL'); gpu.state.depth_mask_set(True)
         gpu.state.face_culling_set(getattr(self, '_cull', 'BACK'))
+        object_id = 0
         for inst in depsgraph.object_instances:
             obj = inst.object
             if obj.type != 'MESH' or not inst.show_self: continue
             slots = self._batch_dict.get(_draw_key(inst))
             if not slots: continue
+            object_id += 1
+            identity = (1.0, 1.0, 1.0) if getattr(obj, 'vlr_outline_exclude', False) else (
+                (object_id & 255)/255.0, ((object_id >> 8) & 255)/255.0, ((object_id >> 16) & 255)/255.0)
+            sf('uObjId', identity)
             cached = self._mesh_cache.get(_draw_key(inst))
             gmin = cached.get('gen_min', (0.0, 0.0, 0.0)) if cached else (0.0, 0.0, 0.0)
             gsc = cached.get('gen_scale', (1.0, 1.0, 1.0)) if cached else (1.0, 1.0, 1.0)
@@ -2077,7 +2083,8 @@ class VertexLitEngine(bpy.types.RenderEngine):
                 if vmid == 2 and rand_mode == 'MATERIAL':
                     sf('uObjColor', _obj_random_color(_mat_name or '__no_material__'))
                 try: batch.draw(sh)
-                except Exception: pass
+                except Exception:
+                    if getattr(self, "_final_render", False) or getattr(self, "_strict_capture", False): raise
 
     def _aux_frame_uniforms(self, sh):
         """Uniforms for the G-buffer aux outputs (view normal + object id) of the main pass."""

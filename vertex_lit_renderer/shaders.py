@@ -265,7 +265,7 @@ void main(){ fragColor = vec4(normalize(vVN) * 0.5 + 0.5, 1.0); }
 # programs instead; this covers the non-material colour modes with the same lighting.
 VIEWMODE_FRAG = ("in vec2 vUV;\nin vec4 vColor;\nin vec3 vWpos;\nin vec3 vNrm;\n"
                  "in vec3 vGenerated;\nin vec3 vObjPos;\nlayout(location = 0) out vec4 outColor;\n"
-                 + AUX_CHUNK_NO_VIEWMAT
+                 + AUX_CHUNK
                  + LIGHT_CHUNK +
                  "uniform int  uViewMode;   /* 1=solid 2=random 3=attribute 4=normal 5=depth */\n"
                  "uniform vec3 uSolidColor;\n"
@@ -273,7 +273,6 @@ VIEWMODE_FRAG = ("in vec2 vUV;\nin vec4 vColor;\nin vec3 vWpos;\nin vec3 vNrm;\n
                  "uniform vec3 uCamPos;\n"
                  "uniform float uDepthMin;\n"
                  "uniform float uDepthMax;\n"
-                 "uniform mat3 uViewMat3;\n"
                  "uniform int  uNormalSpace;   /* 0=world 1=screen */\n"
                  "void main(){\n"
                  "    vec3 N = normalize(vNrm);\n"
