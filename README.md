@@ -68,3 +68,5 @@ Tests under `vertex_lit_renderer/tests` are development scripts. Some need a gra
 - **OpenAI Codex** — AI-assisted implementation, debugging, performance investigation, and regression testing.
 
 Codex is an AI development assistant, not a separate human maintainer or GitHub account.
+
+Lightmap baking temporarily reveals hidden mesh elements so every face is unwrapped, then restores their hidden state. **Clear Bake Selected** removes lighting assignments from selected objects while preserving materials and UV maps; shared images remain while still used.

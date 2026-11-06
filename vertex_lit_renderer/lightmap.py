@@ -87,7 +87,8 @@ def bake_selected(context):
             original = ob.data
             mesh = original.copy()
             selection = [(collection, [element.select for element in collection]) for collection in (mesh.vertices, mesh.edges, mesh.polygons)]
-            record = {'selection': selection, 'object': ob, 'original': original, 'mesh': mesh,
+            hidden = [(collection, [element.hide for element in collection]) for collection in (mesh.vertices, mesh.edges, mesh.polygons)]
+            record = {'hidden': hidden, 'selection': selection, 'object': ob, 'original': original, 'mesh': mesh,
                       'slots': [(slot.link, slot.material) for slot in ob.material_slots], 'image': None}
             staged.append(record)
             ob.data = mesh
@@ -105,6 +106,7 @@ def bake_selected(context):
             bpy.ops.object.select_all(action='DESELECT')
             ob.select_set(True); context.view_layer.objects.active = ob
             bpy.ops.object.mode_set(mode='EDIT')
+            bpy.ops.mesh.reveal(select=True)
             bpy.ops.mesh.select_all(action='SELECT')
             bpy.ops.uv.smart_project(angle_limit=math.radians(66), island_margin=0.0)
             bpy.ops.uv.pack_islands(rotate=True, margin_method='FRACTION', margin=(margin * 2 + 2) / resolution)
@@ -155,6 +157,10 @@ def bake_selected(context):
             ob, mesh, original = record['object'], record['mesh'], record['original']
             if not published: ob.data = original
             else:
+                for collection, flags in record['hidden']:
+                    for element, flag in zip(collection, flags): element.hide = flag
+                for collection, flags in record['selection']:
+                    for element, flag in zip(collection, flags): element.select = flag
                 mesh.materials.clear()
                 for material in original.materials: mesh.materials.append(material)
             for slot, (link, material) in zip(ob.material_slots, record['slots']):
@@ -208,6 +214,40 @@ class VLR_OT_lightmap_bake(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class VLR_OT_lightmap_clear(bpy.types.Operator):
+    bl_idname = 'vertex_lit.lightmap_clear'
+    bl_label = 'Clear Bake Selected'
+    bl_description = 'Remove baked lighting from selected objects; preserve materials and UV maps'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT' and any(ob.type == 'MESH' and ob.vlr_lightmap.image for ob in context.selected_objects)
+
+    def execute(self, context):
+        objects = [ob for ob in context.selected_objects if ob.type == 'MESH' and ob.vlr_lightmap.image]
+        if any(ob.library for ob in objects):
+            self.report({'WARNING'}, 'Make linked library objects local before clearing lightmaps')
+            return {'CANCELLED'}
+        images = set()
+        for ob in objects:
+            images.add(ob.vlr_lightmap.image)
+            ob.vlr_lightmap.image = None
+            # Retain the owned UV name so a future bake replaces it, rather than
+            # accumulating unused UV sets. Do not alter shared mesh data here.
+            ob.vlr_lightmap.status = 'Not baked'
+            ob.update_tag(refresh={'DATA'})
+        from .engine import _invalidate_tex
+        for image in images:
+            if image.get('vlr_lightmap_owned') and image.users == 0:
+                _invalidate_tex(image.name)
+                bpy.data.images.remove(image)
+        for window in context.window_manager.windows:
+            for area in window.screen.areas: area.tag_redraw()
+        self.report({'INFO'}, 'Cleared lightmaps for ' + str(len(objects)) + ' object(s)')
+        return {'FINISHED'}
+
+
 class VLR_PT_lightmap(bpy.types.Panel):
     bl_label = 'Cycles Lightmap Bake'
     bl_idname = 'VLR_PT_lightmap'
@@ -224,11 +264,12 @@ class VLR_PT_lightmap(bpy.types.Panel):
         settings = context.scene.vlr_lightmap_settings
         layout.prop(settings, 'resolution'); layout.prop(settings, 'samples')
         layout.operator('vertex_lit.lightmap_bake')
+        layout.operator('vertex_lit.lightmap_clear')
         ob = context.active_object
         if ob is not None and ob.type == 'MESH': layout.label(text=ob.vlr_lightmap.status)
 
 
-_CLASSES = (VLRLightmapSettings, VLRLightmapState, VLR_OT_lightmap_bake, VLR_PT_lightmap)
+_CLASSES = (VLRLightmapSettings, VLRLightmapState, VLR_OT_lightmap_bake, VLR_OT_lightmap_clear, VLR_PT_lightmap)
 
 
 def register():
