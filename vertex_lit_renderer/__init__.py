@@ -3,14 +3,14 @@
 bl_info = {
     "name":        "Workbench 2.0",
     "author":      "Theory-box / Claude",
-    "version":     (0, 18, 2),
+    "version":     (0, 19, 0),
     "blender":     (4, 2, 0),
     "location":    "Properties > Render > Render Engine → Workbench 2.0",
     "description": "Solid studio + live-node material renderer (+ screen-space AO) for retro game look-dev. "
                    "Lighting (diffuse + shadow + ambient) is computed per vertex "
                    "with per-pixel scene lighting, shadows, and live node materials. "
                    "Optional live material-node preview (transpiles the shader graph to GLSL).",
-    "warning":     "Experimental. F12 render is viewport-quality. Default: Solid studio shading",
+    "warning":     "Development build: Cycles lightmaps. Experimental. F12 render is viewport-quality. Default: Solid studio shading",
     "category":    "Render",
 }
 
@@ -18,9 +18,10 @@ import bpy
 
 
 def register():
-    from . import props, engine, ui, bake, splat_ops, planar
+    from . import props, engine, ui, bake, splat_ops, planar, lightmap
     props.register()
     planar.register()
+    lightmap.register()
     engine.register()
     bake.register()
     splat_ops.register()
@@ -28,10 +29,11 @@ def register():
 
 
 def unregister():
-    from . import props, engine, ui, bake, splat_ops, planar
+    from . import props, engine, ui, bake, splat_ops, planar, lightmap
     ui.unregister()
     splat_ops.unregister()
     bake.unregister()
     engine.unregister()
+    lightmap.unregister()
     planar.unregister()
     props.unregister()

@@ -28,6 +28,27 @@ The bake retains existing materials and supported roughness maps. Roughness chan
 
 This is a fixed-camera, single-plane bake per object. Rebake after camera, geometry, or lighting changes. Apply or disable reflector modifiers. Transparent and recursive reflections are not supported, and roughness filtering is approximate.
 
+## Cycles lightmaps (development branch)
+
+In the 3D View **N sidebar > Workbench 2.0 > Cycles Lightmap Bake**, choose
+**Resolution** and **Samples**, select mesh objects in Object Mode, then click
+**Bake Selected**. The same button rebakes those objects. There is no scene-wide
+bake command.
+
+The operator smart-unwraps and packs a separate UV set and bakes Cycles diffuse
+Direct + Indirect lighting with Color excluded. Existing material shaders stay
+intact. Each object receives its own packed, linear floating-point image, used
+for diffuse lighting in the viewport and F12. Original material UVs and scene
+settings are restored. AO, cavity, outline, and other existing effects are not
+disabled or overridden.
+
+Set up the scene lights/world for Cycles first. Apply topology-changing modifiers
+before baking; the operator warns and stops instead of applying them. The bake
+is static: rebake after lighting or geometry changes. This is diffuse lighting,
+not a bake of metallic reflections or transmission. Collections/GN instances do
+not inherit the source object's position-specific lightmap. Shared meshes are
+made independent for selected bake targets; shared materials remain shared.
+
 ## Known limitations
 
 - Material graphs are translated to GLSL; support is incomplete and results can differ from Cycles or Eevee.

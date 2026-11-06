@@ -2,6 +2,7 @@
 
 import time
 import threading
+from itertools import repeat
 import os
 import numpy as np
 import bpy
@@ -1783,6 +1784,7 @@ class VertexLitEngine(bpy.types.RenderEngine):
         if not getattr(self, '_scene_records_dirty', True):
             return self._scene_records
         records = []
+        self._lightmap_objects = {}
         self._normal_records = {}; self._instance_sources = set()
         self._instance_chunks = {}; self._record_groups = {}
         object_info = {}
@@ -1794,6 +1796,10 @@ class VertexLitEngine(bpy.types.RenderEngine):
             info_key = (obj.as_pointer(), is_instance)
             info = object_info.get(info_key)
             if info is None:
+                if not is_instance:
+                    lightmap_state = getattr(obj, 'vlr_lightmap', None)
+                    if lightmap_state is not None and lightmap_state.image is not None and lightmap_state.uv_name:
+                        self._lightmap_objects[obj.name] = obj.original
                 key = _draw_key(inst)
                 cached = self._mesh_cache.get(key) or {}
                 info = object_info[info_key] = (key, obj.name, self._batch_dict.get(key),
@@ -2133,7 +2139,9 @@ class VertexLitEngine(bpy.types.RenderEngine):
             frame_progs[mat_name] = prog
             return prog
 
-        transparent = []   # (sort_depth, draw_fn) for a back-to-front blended pass
+        from . import lightmap_render
+        lightmap_render.begin_frame(self)
+        transparent = []   # (sort_depth, draw_fn, lightmap_object) for a back-to-front blended pass
 
         aux_a = [1.0]          # 0.0 in the blended pass -> aux targets keep the opaque surface
         aux_on = bool(getattr(self, '_aux_active', False))
@@ -2141,7 +2149,10 @@ class VertexLitEngine(bpy.types.RenderEngine):
         last_cull = [getattr(self, '_cull', 'BACK')]
         mirrored_scene = getattr(self, '_has_mirrored', False)
 
-        def _draw_one(prog, mat, batch, tex, model, nmat, gmin, gsc, oname, objid=(0.0, 0.0, 0.0), instance_shader=None, chunks=None):
+        def _draw_one(prog, mat, batch, tex, model, nmat, gmin, gsc, oname, objid=(0.0, 0.0, 0.0), instance_shader=None, chunks=None, lightmap_object=None):
+            baked = lightmap_render.prepare(self, depsgraph, lightmap_object, prog, mode, batch) if lightmap_object is not None else None
+            if baked is not None:
+                instance_shader, batch, baked_texture = baked
             if mirrored_scene:
                 cull = _model_cull(getattr(self, '_cull', 'BACK'), model)
                 if cull != last_cull[0]:
@@ -2169,6 +2180,8 @@ class VertexLitEngine(bpy.types.RenderEngine):
                         if gtex is not None:
                             try: sh.uniform_sampler(uni,gtex)
                             except Exception: pass
+                if baked is not None:
+                    sh.uniform_sampler('uLightmap', baked_texture)
                 if chunks is None:
                     sh.uniform_float('uModel',model)
                     sh.uniform_float('uNormalMat',nmat)
@@ -2189,6 +2202,8 @@ class VertexLitEngine(bpy.types.RenderEngine):
                         if chunks is None: sh.uniform_float('uObjId', objid)
                         sh.uniform_float('uAuxA', aux_a[0])
                     except Exception: pass
+                if baked is not None:
+                    sh.uniform_sampler('uLightmap', baked_texture)
                 if chunks is None:
                     sh.uniform_float('uModel',model)
                     sh.uniform_float('uNormalMat',nmat)
@@ -2213,7 +2228,8 @@ class VertexLitEngine(bpy.types.RenderEngine):
             if is_transp is None:
                 is_transp = _material_transparent(mat)
                 frame_transp[mat_name] = is_transp
-            if len(records) >= 4 and not is_transp:
+            mapped = [lightmap_render.object_for_record(self, rec) for rec in records] if self._lightmap_objects else None
+            if len(records) >= 4 and not is_transp and (mapped is None or not any(mapped)):
                 base = prog['shader'] if prog is not None else legacy
                 frag = prog['frag'] if prog is not None else (WORKBENCH_FRAG if mode == 'WORKBENCH' else PHONG_FRAG)
                 ish = instancing.shader_for(base, PHONG_VERT, frag)
@@ -2223,16 +2239,16 @@ class VertexLitEngine(bpy.types.RenderEngine):
                     key, oname, model, normal_mat, slots, gmin, gsc, objid = records[0]
                     _draw_one(prog, mat, batch, tex, model, normal_mat, gmin, gsc, oname, objid, ish, chunks)
                     continue
-            for key, oname, model, normal_mat, slots, gmin, gsc, objid in records:
+            for (key, oname, model, normal_mat, slots, gmin, gsc, objid), mapped_object in zip(records, mapped if mapped is not None else repeat(None)):
                 if is_transp:
                     try:
                         c = model.translation; clip = view_proj @ c.to_4d()
                         d = clip.z / clip.w if abs(clip.w) > 1e-6 else 0.0
                     except Exception:
                         d = 0.0
-                    transparent.append((d, (prog, mat, batch, tex, model, normal_mat, gmin, gsc, oname, objid)))
+                    transparent.append((d, (prog, mat, batch, tex, model, normal_mat, gmin, gsc, oname, objid), mapped_object))
                 else:
-                    _draw_one(prog, mat, batch, tex, model, normal_mat, gmin, gsc, oname, objid)
+                    _draw_one(prog, mat, batch, tex, model, normal_mat, gmin, gsc, oname, objid, lightmap_object=mapped_object)
 
         from . import planar_overlay
         planar_overlay.draw(self, depsgraph, view_proj)
@@ -2247,11 +2263,12 @@ class VertexLitEngine(bpy.types.RenderEngine):
             # ALPHA blending accumulates coverage on transparent film while preserving
             # opaque backgrounds. Suppressing alpha writes would erase isolated glass.
             aux_a[0] = 0.0          # alpha 0 + ALPHA blending leaves normal/id untouched
-            for _d, args in transparent:
-                _draw_one(*args)
+            for _d, args, mapped_object in transparent:
+                _draw_one(*args, lightmap_object=mapped_object)
             aux_a[0] = 1.0
             gpu.state.blend_set('NONE')
             gpu.state.depth_mask_set(True)
+        lightmap_render.end_frame(self)
 
     # ── Main draw ─────────────────────────────────────────────────────────
 
