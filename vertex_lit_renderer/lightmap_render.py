@@ -39,7 +39,7 @@ def prepare(engine, depsgraph, obj, prog, mode, drawable):
     data = engine._mesh_cache.get(obj.name)
     if not data or 'vbo2' not in data or not hasattr(drawable, 'start'):
         return None
-    geometry_key = (id(data['vbo']), state.uv_name)
+    geometry_key = (id(data['vbo']), state.uv_name, id(getattr(drawable, 'named_uv_vbo', None)))
     geometry = engine._lightmap_geometry.get(geometry_key)
     if geometry is None:
         evaluated = obj.evaluated_get(depsgraph)
@@ -58,12 +58,13 @@ def prepare(engine, depsgraph, obj, prog, mode, drawable):
         vbo.attr_fill(id='lightmapUV', data=coords.reshape(-1, 2))
         batch = gpu.types.GPUBatch(type='TRIS', buf=data['vbo'], elem=data['ibo'])
         batch.vertbuf_add(data['vbo2']); batch.vertbuf_add(vbo)
+        if hasattr(drawable, 'named_uv_vbo'): batch.vertbuf_add(drawable.named_uv_vbo)
         geometry = engine._lightmap_geometry[geometry_key] = (batch, vbo)
     engine._lightmap_geometry_live.add(geometry_key)
     fragment = prog['frag'] if prog is not None else (shaders.WORKBENCH_FRAG if mode == 'WORKBENCH' else shaders.PHONG_FRAG)
     shader = engine._lightmap_programs.get(fragment)
     if shader is None:
-        vertex = 'in vec2 lightmapUV;\nout vec2 vLightmapUV;\n' + shaders.PHONG_VERT
+        vertex = 'in vec2 lightmapUV;\nout vec2 vLightmapUV;\n' + (prog['vert'] if prog is not None else shaders.PHONG_VERT)
         vertex = vertex.replace('void main() {', 'void main() {\n    vLightmapUV = lightmapUV;')
         frag = 'uniform sampler2D uLightmap;\nin vec2 vLightmapUV;\n' + fragment
         frag = frag.replace('vlr_light(vWpos, N)', 'texture(uLightmap, vLightmapUV).rgb')

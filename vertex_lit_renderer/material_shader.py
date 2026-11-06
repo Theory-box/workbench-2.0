@@ -45,6 +45,10 @@ def build_material_frag(mat, mode="PIXEL"):
     """Return (vertex_src, frag_src, transpile_result). No GPU needed."""
     res = _nt.transpile_material(mat)
     vert, head, main, light = _heads(mode)
+    for i, varying in enumerate(res.uv_maps.values()):
+        vert = 'in vec2 namedUV%d;\nout vec2 %s;\n' % (i, varying) + vert
+        vert = vert.replace('void main() {', 'void main() {\n    %s = namedUV%d;' % (varying, i))
+        head += 'in vec2 %s;\n' % varying
     sampler_decls = "".join("uniform sampler2D {};\n".format(s.uniform) for s in res.samplers)
     param_decls = "".join(d + "\n" for d in res.param_decls)
     frag = (head + sampler_decls + param_decls + light + res.helpers + "\n"
@@ -58,7 +62,8 @@ def build_bake_frag(mat):
     res = _nt.transpile_material(mat)
     sampler_decls = "".join("uniform sampler2D {};\n".format(s.uniform) for s in res.samplers)
     param_decls = "".join(d + "\n" for d in res.param_decls)
-    frag = (_sh.BAKE_FRAG_HEAD + sampler_decls + param_decls + res.helpers + "\n"
+    aliases = ''.join('#define %s vUV\n' % v for v in res.uv_maps.values())
+    frag = (_sh.BAKE_FRAG_HEAD + aliases + sampler_decls + param_decls + res.helpers + "\n"
             + res.glsl + "\n" + _sh.BAKE_FRAG_MAIN)
     return _sh.BAKE_VERT, frag, res
 
@@ -85,6 +90,8 @@ def _compile(mat, mode):
     try:
         vert, frag, res = build_material_frag(mat, mode)
         ent["notes"] = res.notes
+        ent["uv_maps"] = res.uv_maps
+        ent["vert"] = vert
         # Diagnostic: how much of the graph the transpiler resolved. 0 samplers on
         # a material you expect to be textured => the image isn't in the Base Color
         # path the transpiler follows (it may be flat, or wired through other inputs).

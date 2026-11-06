@@ -111,6 +111,7 @@ class Param:
 
 class TranspileResult:
     def __init__(self):
+        self.uv_maps = {}
         self.glsl = ""
         self.samplers = []
         self.params = []
@@ -134,6 +135,8 @@ _GLTYPE = {"float": "float", "vec2": "vec2", "vec3": "vec3", "vec4": "vec4"}
 
 class _Transpiler:
     def __init__(self):
+        self.uv_maps = {}
+        self.named_uvs = False
         self.lines = []
         self.samplers = []
         self.params = []
@@ -245,6 +248,15 @@ class _Transpiler:
             key = (id(out_socket), tuple(id(g) for g, _ in self._group_stack))
         if key in self._sock_var:
             return self._sock_var[key]
+        # Blender supplies the selected input-to-output bypass for muted nodes.
+        # Follow that link (including conversions), rather than executing the node.
+        if getattr(node, 'mute', False):
+            bypass = next((link.from_socket for link in node.internal_links
+                           if link.to_socket == out_socket), None)
+            if bypass is not None:
+                expr = self.input_expr(node, bypass, self._socket_glsl(out_socket))
+                self._sock_var[key] = expr
+                return expr
         # Group Input node: its output sockets map to the ENCLOSING group node's external
         # inputs -> resolve by transpiling the value fed into the group from outside. The
         # external input must be evaluated in the PARENT context (pop this group's frame),
@@ -305,6 +317,10 @@ class _Transpiler:
         return "vec4(vGenerated, 1.0)"
 
     def _n_uvmap(self, node, out):
+        name = getattr(node, 'uv_map', '')
+        if name and self.named_uvs:
+            varying = self.uv_maps.setdefault(name, 'vNamedUV' + str(len(self.uv_maps)))
+            return 'vec4({}, 0.0, 1.0)'.format(varying)
         return "vec4(vUV, 0.0, 1.0)"
 
     def _n_mapping(self, node, out):
@@ -1159,6 +1175,7 @@ def transpile_material(mat):
 
     base = _find_base_socket(mat)
     t = _Transpiler()
+    t.named_uvs = True
     if base is None:
         # Surface isn't a shape we can trace to a base colour (Mix Shader, node
         # group, Add Shader, empty surface, ...). Signal the engine to use the
@@ -1190,6 +1207,7 @@ def transpile_material(mat):
     res.glsl = ("vec4 computeBaseColor(vec2 vUV) {\n"
                 + ("    " + body + "\n" if body else "")
                 + "    return {};\n".format(body_expr) + "}")
+    res.uv_maps = t.uv_maps
     res.samplers = t.samplers
     res.params = t.params
     res.param_decls = t.param_decls
@@ -1235,7 +1253,11 @@ def _tree_sig(nt, seen):
         return "NONODES"
     node_parts = []
     for n in nt.nodes:
-        node_parts.append(n.type + ":" + n.name + "|" + _variant(n))
+        node_parts.append(n.type + ":" + n.name + "|" + _variant(n)
+                          + "|mute=" + str(bool(n.mute)))
+        if n.mute:
+            node_parts.extend("BYPASS:" + n.name + ":" + link.from_socket.identifier
+                              + ">" + link.to_socket.identifier for link in n.internal_links)
         if n.type == 'GROUP':
             gt = getattr(n, "node_tree", None)
             if gt is not None and gt.name not in seen:
@@ -1266,6 +1288,7 @@ def _variant(n):
     elif t == "MIX": v = [getattr(n, "data_type", ""), getattr(n, "blend_type", ""),
                           str(getattr(n, "clamp_result", False)), str(n.clamp_factor), n.factor_mode]
     elif t == "VECT_MATH": v = [getattr(n, "operation", "")]
+    elif t == "UVMAP": v = [getattr(n, "uv_map", ""), str(getattr(n, "from_instancer", False))]
     elif t == "MAPPING": v = [getattr(n, "vector_type", "POINT")]
     elif t == "CLAMP": v = [getattr(n, "clamp_type", "MINMAX")]
     elif t == "MAP_RANGE": v = [getattr(n, "interpolation_type", "LINEAR"), str(getattr(n, "clamp", True)), getattr(n, "data_type", "FLOAT")]
