@@ -1495,6 +1495,10 @@ class VertexLitEngine(bpy.types.RenderEngine):
                         sb = _build_shadow_batch_from_cache(data)
                         if sb: self._shadow_dict[key] = sb
                     _inst_done += 1
+                else:
+                    # Empty/replaced geometry must not leave the old instance visible.
+                    for cache in (self._mesh_cache, self._batch_dict, self._shadow_dict, self._sig_cache):
+                        cache.pop(key, None)
             else:
                 if obj.name not in current: current[obj.name]=obj
 
@@ -1654,6 +1658,10 @@ class VertexLitEngine(bpy.types.RenderEngine):
                 if hkey is not None:
                     self._geo_share[hkey]=(data, slots, sb)
                 self._sig_cache[name]=gsig
+            else:
+                # No drawable triangles: evict the previous geometry and shadow.
+                for cache in (self._mesh_cache, self._batch_dict, self._shadow_dict, self._sig_cache):
+                    cache.pop(name, None)
             done += 1
 
         if remaining:
@@ -2562,26 +2570,9 @@ class VertexLitEngine(bpy.types.RenderEngine):
             self._mesh_cache.clear(); self._batch_dict.clear(); self._shadow_dict.clear()
             self._sig_cache.clear()
             self._dirty = True; self._force_full = True
-        # geometry lives only in the edit BMesh. Write it to a reused temp mesh (~0.5ms)
-        # and extract from that, so geometry edits show in real time. One object only.
-        eob = getattr(context, 'edit_object', None)
-        if eob is not None and eob.type == 'MESH':
-            try:
-                import bmesh
-                bm = bmesh.from_edit_mesh(eob.data)
-                if getattr(self, '_edit_tmp', None) is None:
-                    self._edit_tmp = bpy.data.meshes.new('_vlr_edit_tmp')
-                bm.to_mesh(self._edit_tmp)
-                data = _extract_mesh_data(eob, depsgraph, mesh=self._edit_tmp, attr_name=getattr(self,'_view_attr',''))
-                if data:
-                    self._mesh_cache[eob.name] = data
-                    self._batch_dict[eob.name] = _build_object_slots(data)
-                    self._scene_records_dirty = True
-            except Exception as e:
-                if _DEBUG: print("[VertexLit] edit-mode extract:", e)
-            self.tag_redraw()
-            try: context.region.tag_redraw()
-            except Exception: pass
+        # Edit Mode updates are handled by the same dirty-object rebuild path.
+        # _extract_geometry materializes the evaluated edit mesh on demand;
+        # do not replace its GPU buffers with legacy data on subsequent frames.
 
         if self._dirty:
             self._rebuild(depsgraph,vls)

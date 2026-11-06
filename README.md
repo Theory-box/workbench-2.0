@@ -6,7 +6,15 @@ Experimental Blender renderer with live material-node previews, shadows, and scr
 
 ## Status
 
-Current version: **0.19.1 beta**. Development and recent tests use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum; other versions have not been verified in this testing pass.
+Current version: **0.19.2 beta**. Development and recent tests use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum; other versions have not been verified in this testing pass.
+
+## Changes in 0.19.2 beta
+
+- Keep named UV and baked-lighting buffers intact across idle Edit Mode frames.
+- Remove obsolete per-frame Edit Mode extraction and forced redraws.
+- Evict stale geometry and shadow caches when objects or instance sources become empty.
+
+This supersedes 0.19.1, which could display the correct result for one frame after an edit and then replace it with legacy geometry.
 
 ## Changes in 0.19.1 beta
 
