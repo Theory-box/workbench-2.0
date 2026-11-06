@@ -1102,6 +1102,9 @@ def _trace_base(node, depth=0):
     if node is None or depth > 8:
         return None
     t = node.type
+    if t == "REROUTE":
+        inp = node.inputs[0] if node.inputs else None
+        return _trace_base(inp.links[0].from_node, depth + 1) if inp and inp.is_linked else None
     if t == "BSDF_PRINCIPLED":
         return node.inputs.get("Base Color")
     if t == "EMISSION":
@@ -1135,6 +1138,10 @@ def _find_base_socket(mat):
     if out is None: return None
     surf = out.inputs.get("Surface")
     if surf and surf.is_linked:
+        # Blender accepts color/value/vector outputs here as implicit emission.
+        # Preserve the entire graph instead of dropping into legacy fallback.
+        if surf.links[0].from_socket.type != "SHADER":
+            return surf
         return _trace_base(surf.links[0].from_node)
     return None   # no shader on Surface -> caller falls back to legacy texture path
 
