@@ -6,15 +6,16 @@ Experimental Blender renderer with live material-node previews, shadows, and scr
 
 ## Status
 
-Current version: **0.18.2 beta**. Development and recent tests use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum; other versions have not been verified in this testing pass.
+Current version: **0.19.1 beta**. Development and recent tests use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum; other versions have not been verified in this testing pass.
 
-## Changes in 0.18.2 beta
+## Changes in 0.19.1 beta
 
-- Fix false black sun-shadowed surfaces when switching between cached material shaders.
-- Honor zero shadow softness and correct orthographic shadow-map coverage.
-- Reduce final-render pixel-transfer allocations and redundant CPU geometry storage.
-- Cache unchanged reflection geometry and harden bake cancellation, cleanup, and material-edit recovery.
-- Report final-render object draw failures instead of silently omitting objects.
+- Add selected-object Cycles lightmap baking, rebaking, and clearing in the N sidebar.
+- Automatically unwrap a separate lighting UV set, including hidden mesh faces, and preserve existing materials and UVs.
+- Refresh geometry and UV coordinates during Edit Mode.
+- Honor named UV Map selections in material color/alpha graphs, including live selection changes and baked-lighting combinations.
+- Match Blender gradient output bounds; preserve direct color-to-Surface graphs and shader reroutes.
+- Respect muted-node bypasses and invalidate shader caches when mute state changes.
 
 ## Install
 
@@ -28,12 +29,12 @@ The bake retains existing materials and supported roughness maps. Roughness chan
 
 This is a fixed-camera, single-plane bake per object. Rebake after camera, geometry, or lighting changes. Apply or disable reflector modifiers. Transparent and recursive reflections are not supported, and roughness filtering is approximate.
 
-## Cycles lightmaps (development branch)
+## Cycles lightmaps
 
 In the 3D View **N sidebar > Workbench 2.0 > Cycles Lightmap Bake**, choose
 **Resolution** and **Samples**, select mesh objects in Object Mode, then click
 **Bake Selected**. The same button rebakes those objects. There is no scene-wide
-bake command.
+bake command. **Clear Bake Selected** removes lighting assignments while preserving materials and UV maps. Shared images remain while still used. Hidden mesh elements are temporarily revealed for the unwrap, then restored.
 
 The operator smart-unwraps and packs a separate UV set and bakes Cycles diffuse
 Direct + Indirect lighting with Color excluded. Existing material shaders stay
@@ -55,6 +56,10 @@ made independent for selected bake targets; shared materials remain shared.
 - Partial-alpha sRGB image colors have a known mismatch against Cycles.
 - Shadow casters currently use geometry-only depth; material alpha is not evaluated for shadow casting.
 - Broader GPU failure recovery remains experimental.
+- Shader groups connected directly to Material Output Surface can fall back to simplified shading.
+- Mapping X/Y rotations are not implemented; Texture and Normal mapping modes are incomplete.
+- UV Map From Instancer is not implemented. Named UV selection currently applies to material color/alpha, not planar-reflection roughness graphs.
+- Named-UV materials currently use individual object draws instead of GPU instancing; dense instanced scenes may be slower.
 
 ## Development
 
@@ -68,5 +73,3 @@ Tests under `vertex_lit_renderer/tests` are development scripts. Some need a gra
 - **OpenAI Codex** — AI-assisted implementation, debugging, performance investigation, and regression testing.
 
 Codex is an AI development assistant, not a separate human maintainer or GitHub account.
-
-Lightmap baking temporarily reveals hidden mesh elements so every face is unwrapped, then restores their hidden state. **Clear Bake Selected** removes lighting assignments from selected objects while preserving materials and UV maps; shared images remain while still used.
