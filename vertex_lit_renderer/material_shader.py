@@ -45,6 +45,8 @@ def build_material_frag(mat, mode="PIXEL"):
     """Return (vertex_src, frag_src, transpile_result). No GPU needed."""
     res = _nt.transpile_material(mat, parallax_enabled=True)
     vert, head, main, light = _heads(mode)
+    if getattr(res, 'uses_bump', False) and 'in vec3 vWpos;' not in head:
+        head += 'in vec3 vWpos;\n'
     if "vlrParallaxOffset" in res.glsl:
         if "in vec3 vWpos;" not in head:
             head += "in vec3 vWpos;\n"
@@ -63,6 +65,14 @@ def build_material_frag(mat, mode="PIXEL"):
                             '    float reliefAO = vlrReliefAOFactor();\n'
                             '    vlrSunOutput *= reliefAO;\n'
                             '    outColor.rgb *= reliefAO;\n    vlr_write_aux(N);')
+    if getattr(res, 'has_normal', False):
+        if 'in vec3 vWpos;' not in head:
+            head += 'in vec3 vWpos;\n'
+        lines = main.splitlines(True)
+        base = next(line for line in lines if 'computeBaseColor(vUV)' in line)
+        main = ''.join(line for line in lines if line != base)
+        main = main.replace('\n', '\n' + base, 1)
+        main = main.replace('normalize(vNrm)', 'vlrMaterialNormal').replace('= vlrReliefNormal;', '= vlrMaterialNormal;')
     for i, varying in enumerate(res.uv_maps.values()):
         vert = 'in vec2 namedUV%d;\nout vec2 %s;\n' % (i, varying) + vert
         vert = vert.replace('void main() {', 'void main() {\n    %s = namedUV%d;' % (varying, i))

@@ -148,6 +148,8 @@ class _Transpiler:
         self.uv_roots = set()
         self.parallax_shift = None
         self.parallax_uv_matches = {}
+        self.normal_context = False
+        self.bump_functions = []
         self.lines = []
         self.samplers = []
         self.params = []
@@ -261,7 +263,7 @@ class _Transpiler:
             return self._sock_var[key]
         # Blender supplies the selected input-to-output bypass for muted nodes.
         # Follow that link (including conversions), rather than executing the node.
-        if getattr(node, 'mute', False):
+        if getattr(node, 'mute', False) and node.type != 'BUMP':
             bypass = next((link.from_socket for link in node.internal_links
                            if link.to_socket == out_socket), None)
             if bypass is not None:
@@ -321,6 +323,9 @@ class _Transpiler:
         return "vec4(1.0)"
 
     # =================== node handlers ===================================
+    def _n_bump(self, node, out):
+        from . import bump
+        return bump.emit(self, node)
 
     def _uv_expr(self, name, source):
         self.uv_roots.add(name)
@@ -1202,6 +1207,7 @@ def transpile_material(mat, parallax_enabled=False):
     t = _Transpiler()
     t.owner_name = mat.name
     t.named_uvs = True
+    t.normal_context = parallax_enabled
     parallax_glsl = ""
     parallax_source = None
     if parallax_enabled:
@@ -1236,10 +1242,20 @@ def transpile_material(mat, parallax_enabled=False):
         except Exception:
             pass
 
+    normal_expr = None
+    if parallax_enabled and base is not None:
+        normal = base.node.inputs.get('Normal')
+        if normal is not None and normal.is_linked:
+            normal_expr = t.input_expr(base.node, normal, 'vec3')
+    res.has_normal = normal_expr is not None
+    res.uses_bump = bool(t.bump_functions)
     body = "\n    ".join(t.lines)
-    res.glsl = (parallax_glsl + "vec4 computeBaseColor(vec2 vUV) {\n"
+    res.glsl = (parallax_glsl + '\n'.join(t.bump_functions)
+                + ('\nvec3 vlrMaterialNormal;\n' if normal_expr else '')
+                + "vec4 computeBaseColor(vec2 vUV) {\n"
                 + ("    vec2 vlrOffset = vlrParallaxOffset(" + parallax_source + ");\n" if parallax_source else "")
                 + ("    " + body + "\n" if body else "")
+                + ('    vlrMaterialNormal = normalize('+normal_expr+');\n' if normal_expr else '')
                 + "    return {};\n".format(body_expr) + "}")
     res.uv_maps = t.uv_maps
     res.parallax_uv_matches = t.parallax_uv_matches
