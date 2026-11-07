@@ -308,6 +308,7 @@ class VLR_PT_lightmap(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
+        layout.prop(context.scene.vertex_lit, "lightmap_intensity", slider=True)
         ob = context.active_object
         if ob is None or ob.type != 'MESH':
             layout.label(text='Select a mesh to edit bake settings')

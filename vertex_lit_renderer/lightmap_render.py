@@ -68,15 +68,15 @@ def prepare(engine, depsgraph, obj, prog, mode, drawable):
     if shader is None:
         vertex = 'in vec2 lightmapUV;\nout vec2 vLightmapUV;\n' + (prog['vert'] if prog is not None else shaders.PHONG_VERT)
         vertex = vertex.replace('void main() {', 'void main() {\n    vLightmapUV = lightmapUV;')
-        frag = 'uniform sampler2D uLightmap;\nin vec2 vLightmapUV;\n' + fragment
+        frag = 'uniform float uLightmapIntensity;\nuniform sampler2D uLightmap;\nin vec2 vLightmapUV;\n' + fragment
         if keep_live:
             # Add irradiance after the live-light clamp. Preserve the separate sun
             # output so contact shadows only remove sunlight, never baked bounce.
             frag = frag.replace('outColor = vec4(lit *',
-                                'outColor = vec4((lit + texture(uLightmap, vLightmapUV).rgb) *')
+                                'outColor = vec4((lit + (texture(uLightmap, vLightmapUV).rgb * uLightmapIntensity)) *')
         else:
-            frag = frag.replace('vlr_light(vWpos, N)', 'texture(uLightmap, vLightmapUV).rgb')
-            frag = frag.replace('uKeyCol * ndl + vec3(uAmbient)', 'texture(uLightmap, vLightmapUV).rgb')
+            frag = frag.replace('vlr_light(vWpos, N)', '(texture(uLightmap, vLightmapUV).rgb * uLightmapIntensity)')
+            frag = frag.replace('uKeyCol * ndl + vec3(uAmbient)', '(texture(uLightmap, vLightmapUV).rgb * uLightmapIntensity)')
             # Lightmaps are linear HDR lighting, not restricted to the live-light cap.
             frag = frag.replace('clamp(light, 0.0, 12.0)', 'light')
             frag = frag.replace('vlr_write_aux(N);', 'vlrSunOutput = vec3(0.0); vlr_write_aux(N);')

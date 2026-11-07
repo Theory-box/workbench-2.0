@@ -42,6 +42,9 @@ def _view_mode_update(self, context):
 
 
 class VertexLitSettings(bpy.types.PropertyGroup):
+    lightmap_intensity: bpy.props.FloatProperty(name="Lightmap Intensity", default=1.0,
+        min=0.0, soft_max=2.0, description="Global multiplier for baked lightmap lighting; updates without rebaking")
+
     quick_navigation: bpy.props.BoolProperty(name="Quick Navigation", default=False,
         description="Temporarily disable parallax during viewport navigation, transforms, Edit Mode geometry changes and viewport playback; restore about 0.067 seconds after movement stops. Final still and animation renders remain full quality")
 

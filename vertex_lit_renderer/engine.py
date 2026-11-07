@@ -2255,6 +2255,7 @@ class VertexLitEngine(bpy.types.RenderEngine):
                     except ValueError: pass
                 if baked is not None:
                     sh.uniform_sampler('uLightmap', baked_texture)
+                    sh.uniform_float('uLightmapIntensity', vls.lightmap_intensity if vls else 1.0)
                 if chunks is None:
                     sh.uniform_float('uModel',model)
                     sh.uniform_float('uNormalMat',nmat)
@@ -2279,6 +2280,7 @@ class VertexLitEngine(bpy.types.RenderEngine):
                     except Exception: pass
                 if baked is not None:
                     sh.uniform_sampler('uLightmap', baked_texture)
+                    sh.uniform_float('uLightmapIntensity', vls.lightmap_intensity if vls else 1.0)
                 if chunks is None:
                     sh.uniform_float('uModel',model)
                     sh.uniform_float('uNormalMat',nmat)
