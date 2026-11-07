@@ -6,9 +6,9 @@ Experimental Blender renderer with live material-node previews, shadows, and scr
 
 ## Status
 
-Published version: **0.19.13 beta**. Development and primary tests use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum; the new features have not been validated on 4.2.
+Published version: **0.19.15 beta**. Development and primary tests use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum; the new features have not been validated on 4.2.
 
-Unpublished branch build **0.19.15** adds **Cavity World > Method > XeGTAO
+Version **0.19.15** adds **Cavity World > Method > XeGTAO
 (experimental)**. Classic SSAO remains the default for existing scenes. This is
 a GLSL adaptation of XeGTAO's horizon integral with a custom depth-aware 5x5
 spatial filter, full-resolution depth sampling and fixed noise. It does not yet
