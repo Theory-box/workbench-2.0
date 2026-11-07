@@ -17,11 +17,11 @@ It uses Blender's GPU API and custom rasterization shaders. It is not a path tra
 - **Simple lighting controls:** camera-relative Key Light, Sky/Ground fill, and Sun, each with an independent on/off checkbox that preserves its settings.
 - **Sun shadows:** shadow maps plus optional screen-space contact shadows for nearby detail.
 - **AO and cavity:** Classic SSAO, experimental XeGTAO-based AO, screen cavity, and outlines. A per-material Scene AO slider controls how much scene AO a surface receives.
-- **Height-map parallax:** the custom Workbench 2.0 Parallax node adds apparent relief without subdivision, with local sun self-shadowing, height AO, relief normals, and depth intersections with other objects. A global toggle lets you disable it across the scene.
+- **Height-map parallax:** the custom Workbench 2.0 Parallax node adds apparent relief without subdivision, with local sun self-shadowing, height AO, relief normals, and depth intersections with other objects. A global toggle lets you disable it across the scene. Optional Quick Navigation temporarily bypasses parallax during viewport movement and playback, with immediate restoration when stationary; final renders retain full quality.
 - **Standard Bump node:** height-based normal shading with live controls, image/procedural inputs, and support for chaining and parallax integration.
 - **General UV Blur node:** blur supported UV-based color or value graphs, including height maps, using automatically refreshed GPU caches.
 - **Baked planar reflections:** capture selected coplanar faces for a fixed camera, retain existing materials, and adjust supported roughness inputs live. Rebake or clear the reflection when needed.
-- **Cycles lightmaps:** Bake Selected automatically creates a separate lighting UV layout and bakes diffuse direct and indirect illumination. Resolution and samples are adjustable; rebake and clear are available in the sidebar.
+- **Cycles lightmaps:** Bake Selected automatically creates a separate lighting UV layout and bakes diffuse direct, indirect, or both illumination passes. Resolution and samples are remembered per object; rebake and clear are available in the sidebar. Keep Live Lighting adds baked bounce to real-time lighting and parallax self-shadowing.
 - **Alternative view modes:** Textured, Solid, Random, Attribute, Normal, and Depth, plus anti-aliasing controls.
 
 ## Install and get started
@@ -38,18 +38,24 @@ For parallax, add **Workbench 2.0 Parallax** in the Shader Editor. Connect a UV-
 
 ## Compatibility and limitations
 
-**Current release: 0.19.17 beta.** Development and primary testing use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum, but current features have not been validated on 4.2. Other GPU vendors and large production scenes are not comprehensively tested; performance depends on scene complexity and enabled effects.
+**Current release: 0.19.18 beta.** Development and primary testing use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum, but current features have not been validated on 4.2. Other GPU vendors and large production scenes are not comprehensively tested; performance depends on scene complexity and enabled effects.
 
 - Shader-node support is incomplete. Materials can look different from Cycles or Eevee; custom nodes do not produce equivalent effects in those engines.
 - Parallax changes apparent surface depth, not mesh geometry or the outer silhouette. UV seams, extreme grazing angles, and complex height graphs have quality/performance limits.
 - Screen-space effects cannot see hidden or off-screen geometry. XeGTAO is an experimental adaptation, not the complete upstream implementation.
 - Planar reflections are fixed-view bakes, not general real-time reflections. Rebake after camera, geometry, or lighting changes.
-- Lightmaps are static diffuse lighting. Set up the scene for Cycles first, and apply topology-changing modifiers before baking. They do not bake parallax as real geometry.
+- Lightmaps are static diffuse lighting. Choose existing Cycles scene lighting or the temporary Workbench lighting rig. Bake-target modifiers are temporarily disabled and then restored; generated modifier surfaces may not match the base-mesh lightmap. Baking blocks the interface until completion. They do not bake parallax as real geometry.
 - Sun shadow maps use geometry-only depth; material alpha is not evaluated for casting those shadows.
 
 See the [feature guide](docs/FEATURE_GUIDE.md) for controls, tested behavior, cache restrictions, and further known limitations. Release notes record individual changes.
 
 ## Latest update
+
+**0.19.18 beta** adds Quick Navigation and per-object lightmap bake settings, including Direct / Indirect / Both passes. Bake-target modifiers are temporarily disabled and restored. **Keep Live Lighting** defaults on, preserving live Sun and parallax self-shadowing with baked lighting; choose **Indirect** to avoid doubling direct light. The previous blocking bake behavior is retained so the temporary Solid viewport is not exposed during a background job.
+
+See [Quick Navigation](docs/QUICK_NAVIGATION.md) and [per-object bake settings](docs/OBJECT_BAKE_SETTINGS.md).
+
+### Previous update
 
 **0.19.17 beta** adds support for Blender's standard **Bump** node (Strength, Distance, Filter Width, Invert, and normal chaining), plus **Cycles — Workbench Lighting** for lightmap baking. The new lighting mode transfers our Sun and Sky/Ground into a temporary Cycles rig, preserves mesh emission, and restores original lights/world afterward. **Cycles — Scene Lighting** retains the existing workflow. The silhouette-clipping experiment is not included.
 
