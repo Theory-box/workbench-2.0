@@ -43,7 +43,7 @@ def _view_mode_update(self, context):
 
 class VertexLitSettings(bpy.types.PropertyGroup):
     quick_navigation: bpy.props.BoolProperty(name="Quick Navigation", default=False,
-        description="Temporarily disable parallax during viewport navigation, transforms, Edit Mode geometry changes and viewport playback; restore on the next stationary redraw. Final still and animation renders remain full quality")
+        description="Temporarily disable parallax during viewport navigation, transforms, Edit Mode geometry changes and viewport playback; restore about 0.067 seconds after movement stops. Final still and animation renders remain full quality")
 
     use_parallax: bpy.props.BoolProperty(
         name="Parallax", default=True,
@@ -108,7 +108,7 @@ class VertexLitSettings(bpy.types.PropertyGroup):
         name="View Mode",
         items=[
             ('TEXTURED',  "Textured",  "Show materials / textures (live node graph)"),
-            ('SOLID',     "Solid",     "Flat single colour on every surface"),
+            ('SOLID',     "Solid",     "Uniform color with optional material surface detail"),
             ('RANDOM',    "Random",    "A random colour per object or per material"),
             ('ATTRIBUTE', "Attribute", "Show the mesh colour attribute (vertex colours)"),
             ('NORMAL',    "Normal",    "Visualise surface normals as colour"),
@@ -176,8 +176,11 @@ class VertexLitSettings(bpy.types.PropertyGroup):
         name="Far", default=20.0, min=0.01, soft_max=1000.0,
         description="Distance mapped to black")
     solid_color: bpy.props.FloatVectorProperty(
-        name="Solid Color", subtype='COLOR', default=(0.8, 0.8, 0.8),
-        min=0.0, max=1.0, description="Flat colour used by the Solid view mode")
+        name="Solid Color", subtype='COLOR', default=(1.0, 1.0, 1.0),
+        min=0.0, max=1.0, description="Uniform surface color used by Solid view")
+    solid_surface_detail: bpy.props.BoolProperty(
+        name="Surface Detail", default=True,
+        description="Keep material normals, bump, parallax and its self-shadowing in Solid view; disable for plain mesh shading")
     view_attribute: bpy.props.StringProperty(
         name="Attribute", default="",
         description="Colour attribute to display in Attribute view (blank = active)",

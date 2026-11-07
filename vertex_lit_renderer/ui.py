@@ -108,6 +108,7 @@ class VERTEX_LIT_PT_settings(bpy.types.Panel):
         body.prop(s, 'view_mode', text="")
         if s.view_mode == 'SOLID':
             body.prop(s, 'solid_color', text="")
+            body.prop(s, 'solid_surface_detail')
         elif s.view_mode == 'RANDOM':
             body.prop(s, 'random_mode', text="")
         elif s.view_mode == 'NORMAL':

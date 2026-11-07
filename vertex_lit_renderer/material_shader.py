@@ -73,6 +73,14 @@ def build_material_frag(mat, mode="PIXEL"):
         main = ''.join(line for line in lines if line != base)
         main = main.replace('\n', '\n' + base, 1)
         main = main.replace('normalize(vNrm)', 'vlrMaterialNormal').replace('= vlrReliefNormal;', '= vlrMaterialNormal;')
+    # Override only the display albedo, after evaluating the graph's relief/normal.
+    # Do not replace graph color sockets: they may also drive height or alpha.
+    head += _sh.SURFACE_VIEW_UNIFORMS
+    main = main.replace('= vlrMaterialNormal;', '= (uSurfaceDetail != 0 ? vlrMaterialNormal : normalize(vNrm));')
+    main = main.replace('= vlrReliefNormal;', '= (uSurfaceDetail != 0 ? vlrReliefNormal : normalize(vNrm));')
+    main = main.replace('computeBaseColor(vUV);',
+                        'computeBaseColor(vUV); if (uSurfaceView == 1) base.rgb = uSurfaceColor;')
+    main = main.replace('    vlr_write_aux(N);', '    vlr_write_aux(N);\n' + _sh.SURFACE_VIEW_NORMAL)
     for i, varying in enumerate(res.uv_maps.values()):
         vert = 'in vec2 namedUV%d;\nout vec2 %s;\n' % (i, varying) + vert
         vert = vert.replace('void main() {', 'void main() {\n    %s = namedUV%d;' % (varying, i))

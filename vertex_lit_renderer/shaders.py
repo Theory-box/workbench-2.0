@@ -234,6 +234,34 @@ MAT_FRAG_MAIN_PIXEL = (
     "}\n"
 )
 
+# Shared display overrides for material and fallback shaders.
+SURFACE_VIEW_UNIFORMS = """
+uniform int uSurfaceDetail;
+uniform int uSurfaceView; // 0=material, 1=solid, 2=normal
+uniform vec3 uSurfaceColor;
+uniform int uSurfaceNormalSpace;
+"""
+SURFACE_VIEW_NORMAL = """
+    if (uSurfaceView == 2) {
+        vec3 displayNormal = (uSurfaceNormalSpace == 1) ? normalize(uViewMat3 * N) : N;
+        outColor = vec4(displayNormal * 0.5 + 0.5, outColor.a);
+        outSunG = vec4(0.0);
+    }
+"""
+# The fallback path includes non-node materials and unassigned slots.
+PHONG_FRAG = SURFACE_VIEW_UNIFORMS + PHONG_FRAG.replace(
+    'vec3 lit   = clamp(light, 0.0, 12.0) * vColor.rgb;',
+    'vec3 surfaceColor = (uSurfaceView == 1) ? uSurfaceColor : vColor.rgb;\n'
+    '    vec3 lit = clamp(light, 0.0, 12.0) * surfaceColor;').replace(
+    '    outColor =', '    if (uSurfaceView == 1) albedo.rgb = vec3(1.0);\n    outColor =').replace(
+    '* vColor.rgb * albedo.rgb;', '* surfaceColor * albedo.rgb;').replace(
+    '    vlr_write_aux(N);', '    vlr_write_aux(N);\n' + SURFACE_VIEW_NORMAL)
+WORKBENCH_FRAG = SURFACE_VIEW_UNIFORMS + WORKBENCH_FRAG.replace(
+    '    outColor =', '    vec3 surfaceColor = (uSurfaceView == 1) ? uSurfaceColor : vColor.rgb;\n'
+    '    if (uSurfaceView == 1) albedo.rgb = vec3(1.0);\n    outColor =').replace(
+    'albedo.rgb * vColor.rgb', 'albedo.rgb * surfaceColor').replace(
+    '    vlr_write_aux(N);', '    vlr_write_aux(N);\n' + SURFACE_VIEW_NORMAL)
+
 # ---- Object-ID pass (flat per-object colour) for Workbench-style outline ------
 ID_VERT = """
 uniform mat4 uViewProj;

@@ -2129,6 +2129,12 @@ class VertexLitEngine(bpy.types.RenderEngine):
                 self._apply_frame_uniforms(sh, view_proj, ls_mat, sky, ground, bstr,
                                            do_shad, s_bias, s_dark, shad_tex, lights, studio)
                 self._aux_frame_uniforms(sh)
+                try:
+                    sh.uniform_int('uSurfaceView', 1 if view_mode == 'SOLID' else 2 if view_mode == 'NORMAL' else 0)
+                    sh.uniform_float('uSurfaceColor', tuple(vls.solid_color))
+                    sh.uniform_int('uSurfaceNormalSpace', 1 if vls.normal_space == 'SCREEN' else 0)
+                    sh.uniform_int('uSurfaceDetail', 0 if view_mode == 'SOLID' and not vls.solid_surface_detail else 1)
+                except ValueError: pass
                 # Retain the GPU program until this draw ends. Mid-frame material
                 # invalidation can evict instance shaders; recycled Python IDs must
                 # never inherit another program's initialized-uniform marker.
@@ -2144,7 +2150,7 @@ class VertexLitEngine(bpy.types.RenderEngine):
 
         # Non-textured view modes bypass the material programs entirely.
         view_mode = getattr(vls, 'view_mode', 'TEXTURED')
-        if view_mode != 'TEXTURED':
+        if view_mode not in {'TEXTURED', 'SOLID', 'NORMAL'}:
             self._draw_viewmode(depsgraph, vls, view_proj, studio, ls_mat, sky, ground,
                                 bstr, lights, view_mode)
             return
@@ -2217,7 +2223,7 @@ class VertexLitEngine(bpy.types.RenderEngine):
                     for p in prog['params']:
                         try:
                             value = p.value(nt)
-                            if p.uniform == 'uParallax_depth' and vls is not None and (not vls.use_parallax or getattr(self, '_quick_parallax', False)):
+                            if p.uniform == 'uParallax_depth' and vls is not None and (not vls.use_parallax or getattr(self, '_quick_parallax', False) or (view_mode == 'SOLID' and not vls.solid_surface_detail)):
                                 value = 0.0
                             sh.uniform_float(p.uniform, value)
                         except Exception: pass
@@ -2326,7 +2332,8 @@ class VertexLitEngine(bpy.types.RenderEngine):
                     _draw_one(prog, mat, batch, tex, model, normal_mat, gmin, gsc, oname, objid, lightmap_object=mapped_object, draw_key=key)
 
         from . import planar_overlay
-        planar_overlay.draw(self, depsgraph, view_proj)
+        if view_mode == 'TEXTURED':
+            planar_overlay.draw(self, depsgraph, view_proj)
         # The overlay binds its own programs/textures outside _ensure_frame.
         last_shader[0] = None
 

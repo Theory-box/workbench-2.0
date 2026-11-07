@@ -1,5 +1,8 @@
 """Per-viewport temporary parallax bypass; never changes scene/material settings."""
 import bpy
+import time
+
+IDLE_DELAY = 0.2 / 3.0
 
 
 def note_updates(engine, updates):
@@ -21,7 +24,10 @@ def update(engine, context, settings):
     if enabled and ((previous is not None and previous != signature)
                     or getattr(rv, 'is_navigating', False) or playing):
         changed = True
-    active = enabled and changed
+    now = time.monotonic()
+    if enabled and changed:
+        engine._quick_changed = now
+    active = enabled and now - getattr(engine, '_quick_changed', -1000.0) < IDLE_DELAY
     engine._quick_parallax = active
     if active and not getattr(engine, '_quick_timer', False):
         engine._quick_timer = True
@@ -32,5 +38,5 @@ def update(engine, context, settings):
                 area.tag_redraw()
             except (ReferenceError, RuntimeError):
                 pass
-        bpy.app.timers.register(redraw, first_interval=0.0)
+        bpy.app.timers.register(redraw, first_interval=max(0.001, IDLE_DELAY - (now - engine._quick_changed)))
     return active
