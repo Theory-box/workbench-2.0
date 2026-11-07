@@ -2101,7 +2101,7 @@ class VertexLitEngine(bpy.types.RenderEngine):
         from . import blur
         blur.begin_frame()
         legacy=_get_main_shader(mode)
-        frame_done={}; params_bound={}
+        frame_done={}; params_bound={}; blur_domains_bound={}
         # Progressive compile: sharpen at most ~40ms of new material shaders per frame,
         # so the scene shows instantly (base-texture path) instead of freezing while
         # every material compiles up front. While geometry is still STREAMING in, don't
@@ -2194,7 +2194,13 @@ class VertexLitEngine(bpy.types.RenderEngine):
             if prog is not None:
                 sh=instance_shader if instance_shader is not None else prog['shader']
                 binding_changed = params_bound.get(id(sh)) is not prog
-                rebind_samplers = last_shader[0] is not sh or binding_changed or prog.get('has_blur', False)
+                blur_domain_key = None
+                if prog.get('has_blur'):
+                    blur.set_object(bpy.data.objects.get(oname), depsgraph)
+                    blur_domain_key = tuple((uni, blur.domain_for(src)) for uni,src in prog['samplers']
+                                            if getattr(src,'is_blur_source',False))
+                rebind_samplers = (last_shader[0] is not sh or binding_changed
+                                   or blur_domains_bound.get(id(sh)) != blur_domain_key)
                 _ensure_frame(sh)
                 if aux_on:
                     try:
@@ -2212,6 +2218,7 @@ class VertexLitEngine(bpy.types.RenderEngine):
                     textures = blur.resolve_samplers(prog['samplers'])
                     sh.bind()  # A blur cache rebuild uses its own GPU program.
                     blur.bind_domains(sh, prog['samplers'])
+                    blur_domains_bound[id(sh)] = blur_domain_key
                     if prog.get('has_blur'):
                         try: sh.uniform_sampler('uShadowMap', shad_tex)
                         except (ValueError, TypeError): pass

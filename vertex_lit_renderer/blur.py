@@ -17,6 +17,7 @@ _bounds_cache = OrderedDict()
 _domain_object = None
 _domain_depsgraph = None
 _coverage = {}
+_periodic_frame = {}
 _filter_shader = None
 _warnings = {}
 _MAX_BYTES = 64 * 1024 * 1024
@@ -42,6 +43,7 @@ class VLRShaderNodeBlur(bpy.types.ShaderNodeCustomGroup):
     strength: FloatProperty(name='Strength', default=1, min=0, max=1, update=changed)
     resolution: EnumProperty(name='Resolution', items=[(str(n), str(n), '') for n in (128,256,512,1024,2048)], default='512', description='Requested pixels per UV unit; large UV ranges are capped by Max Cache Edge', update=changed)
     coverage_limit: EnumProperty(name='Max Cache Edge', items=[(str(n),str(n),'') for n in (512,1024,2048,4096)], default='2048', description='Limit cache dimensions for extended UV ranges; total cache memory is also bounded', update=changed)
+    cache_space: EnumProperty(name='UV Cache', items=[('AUTO','Auto','Share repeating textures; expand nonperiodic graphs'),('TILE','Repeat Tile','Use the original shared 0-1 tile cache'),('OBJECT','Object UV Range','Cache the actual mesh UV range')], default='AUTO', update=changed)
     extension: EnumProperty(name='Edges', items=[('REPEAT','Repeat','Wrap the cached UV tile'),('EXTEND','Extend','Clamp to the edge of the cached UV tile')], default='REPEAT', update=changed)
 
     def init(self, context):
@@ -58,6 +60,7 @@ class VLRShaderNodeBlur(bpy.types.ShaderNodeCustomGroup):
     def draw_buttons(self, context, layout):
         layout.prop(self,'radius');layout.prop(self,'strength')
         layout.prop(self,'resolution');layout.prop(self,'extension')
+        layout.prop(self,'cache_space')
         layout.label(text='Auto UV coverage; color / value')
         coverage=_coverage.get((self.id_data.name,self.name))
         if coverage:
@@ -145,6 +148,7 @@ def emit(t,node):
 
 def begin_frame():
     _image_keys.clear()
+    _periodic_frame.clear()
     set_object()
 
 
@@ -153,7 +157,85 @@ def set_object(obj=None, depsgraph=None):
     _domain_object, _domain_depsgraph = obj, depsgraph
 
 
+def _linked_output(socket, stack, seen):
+    if socket is None or not socket.is_linked:return None
+    link=socket.links[0];node,out=link.from_node,link.from_socket
+    key=(node.as_pointer(),out.identifier,tuple(n.as_pointer() for n in stack))
+    if key in seen:return None
+    seen=seen|{key}
+    if node.mute:
+        bypass=next((l.from_socket for l in node.internal_links if l.to_socket==out),None)
+        return _linked_output(bypass,stack,seen)
+    if node.type=='REROUTE':return _linked_output(node.inputs[0],stack,seen)
+    if node.type=='GROUP_INPUT' and stack:
+        group=stack[-1]
+        inp=next((s for s in group.inputs if s.identifier==out.identifier),None)
+        return _linked_output(inp,stack[:-1],seen)
+    if node.type=='GROUP':
+        tree=node.node_tree
+        gout=next((n for n in tree.nodes if n.type=='GROUP_OUTPUT' and n.is_active_output),None) if tree else None
+        inp=next((s for s in gout.inputs if s.identifier==out.identifier),None) if gout else None
+        return _linked_output(inp,stack+(node,),seen)
+    return node,out,stack,seen
+
+
+def _uv_linear(socket, stack, seen):
+    item=_linked_output(socket,stack,seen)
+    if item is None:return None
+    node,out,stack,seen=item
+    if node.type=='UVMAP' or node.type=='TEX_COORD' and out.name=='UV':
+        return np.array(((1.,0.),(0.,1.),(0.,0.)))
+    if node.type=='MAPPING' and node.vector_type in {'POINT','VECTOR'}:
+        if any(node.inputs[k].is_linked for k in ('Location','Rotation','Scale')):return None
+        a=_uv_linear(node.inputs['Vector'],stack,seen)
+        if a is None:return None
+        from mathutils import Euler
+        rot=np.array(Euler(node.inputs['Rotation'].default_value).to_matrix())
+        return rot @ (np.array(node.inputs['Scale'].default_value)[:,None]*a)
+    if node.type=='VECT_MATH':
+        a=_uv_linear(node.inputs[0],stack,seen)
+        if a is None:return None
+        if node.operation=='SCALE' and not node.inputs['Scale'].is_linked:
+            return a*node.inputs['Scale'].default_value
+        if not node.inputs[1].is_linked:
+            if node.operation in {'ADD','SUBTRACT'}:return a
+            if node.operation=='MULTIPLY':return a*np.array(node.inputs[1].default_value)[:,None]
+    return None
+
+
+def periodic_input(socket, stack=(), seen=frozenset()):
+    if socket is None or not socket.is_linked:return True
+    item=_linked_output(socket,stack,seen)
+    if item is None:return False
+    node,out,stack,seen=item
+    if node.bl_idname==NODE_ID:return periodic_input(node.inputs['Color'],stack,seen)
+    if node.type=='TEX_IMAGE':
+        if node.extension!='REPEAT' or node.projection!='FLAT':return False
+        vector=node.inputs['Vector']
+        if not vector.is_linked:return True
+        a=_uv_linear(vector,stack,seen)
+        return a is not None and np.isfinite(a).all() and np.allclose(a[:2],np.round(a[:2]),atol=1e-6,rtol=0)
+    if node.type in {'UVMAP','TEX_COORD','ATTRIBUTE','NEW_GEOMETRY','OBJECT_INFO'}:return False
+    # Restrict proof to deterministic pointwise operations supported by the compiler.
+    if node.type not in {'RGB','VALUE','MATH','VECT_MATH','MIX','MIX_RGB','VALTORGB',
+                         'HUE_SAT','GAMMA','INVERT','BRIGHTCONTRAST','CURVE_RGB',
+                         'CURVE_FLOAT','RGBTOBW','SEPXYZ','COMBXYZ','SEPRGB','COMBRGB',
+                         'SEPARATE_COLOR','COMBINE_COLOR','CLAMP','MAP_RANGE'}:return False
+    return all(periodic_input(inp,stack,seen) for inp in node.inputs if inp.is_linked)
+
+
 def domain_for(source):
+    node,root=source.get_node()
+    if node.cache_space=='TILE':return (0.0,0.0,1.0,1.0)
+    if node.cache_space=='AUTO':
+        if source.key not in _periodic_frame:
+            stack=[];tree=root
+            for name in source.group_path:
+                group=tree.nodes.get(name) if tree else None
+                if group is None:break
+                stack.append(group);tree=group.node_tree
+            _periodic_frame[source.key]=periodic_input(node.inputs['Color'],tuple(stack))
+        if _periodic_frame[source.key]:return (0.0,0.0,1.0,1.0)
     obj = _domain_object
     if obj is None or obj.type != 'MESH': return (0.0,0.0,1.0,1.0)
     key = (obj.as_pointer(),obj.data.as_pointer(),source.uv_name)
@@ -341,7 +423,7 @@ def texture(source):
 @persistent
 def clear(*args):
     global _filter_shader
-    _cache.clear();_image_keys.clear();_image_seen.clear();_warnings.clear();_bounds_cache.clear();_coverage.clear();set_object();_filter_shader=None
+    _cache.clear();_image_keys.clear();_image_seen.clear();_warnings.clear();_bounds_cache.clear();_coverage.clear();_periodic_frame.clear();set_object();_filter_shader=None
     stats['bytes']=0
 
 

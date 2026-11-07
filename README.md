@@ -6,7 +6,7 @@ Experimental Blender renderer with live material-node previews, shadows, and scr
 
 ## Status
 
-Published version: **0.19.3 beta**. This branch is **0.19.8 extended-UV blur beta**, not a release. Development and primary tests use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum.
+Published version: **0.19.3 beta**. This branch is **0.19.9 blur cache regression fix beta**, not a release. Development and primary tests use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum.
 
 ## General UV Blur node (0.19.5 development beta)
 
@@ -22,6 +22,10 @@ nested Blur nodes are supported.
 - **Max Cache Edge**: appears for extended UV ranges, limits the automatic cache
   dimensions (default 2048). Increase for finer detail on large UV layouts; the
   64 MiB memory cap still applies. The node shows the resulting cache dimensions.
+- **UV Cache**: Auto shares the original full-resolution 0–1 tile for graphs proven
+  periodic (repeating image textures, supported integer UV transforms, and pointwise
+  color operations). Nonperiodic graphs use the object's UV range. Repeat Tile forces
+  the original behavior; Object UV Range forces expanded coverage.
 - **Edges**: Repeat tiles the cache; Extend clamps it.
 
 Zero Radius, zero Strength, and muting bypass the cache exactly. Otherwise the
@@ -37,8 +41,9 @@ Dirty/generated source images receive one CPU content check per draw (shared amo
 Blur nodes) because Blender does not expose a reliable pixel revision counter;
 large edited images can therefore still add redraw overhead.
 
-The cache follows each object's actual UV range, including offset/negative UVs,
-with padding outside expanded bounds. This keeps nonperiodic procedural patterns
+For nonperiodic graphs, the cache follows each object's actual UV range, including offset/negative UVs,
+with padding outside expanded bounds. Periodic image graphs retain the original
+shared tile, avoiding resolution loss and repeated large-cache rebuilds. This keeps nonperiodic procedural patterns
 aligned with unblurred color, rather than repeating an unrelated 0–1 tile. The same
 material can use different coverage on different objects. Existing 0–1 layouts
 retain their tile behavior; standalone albedo baking still evaluates a 0–1 tile.
