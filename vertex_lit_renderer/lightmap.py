@@ -34,6 +34,31 @@ def _temporary_material(original):
 
 
 def bake_selected(context):
+    """Bake base meshes and restore modifier visibility even if staging/cleanup fails."""
+    objects = [ob for ob in context.selected_objects if ob.type == 'MESH']
+    if context.mode != 'OBJECT':
+        raise ValueError('Bake lightmaps in Object Mode')
+    if any(ob.library or ob.data.library for ob in objects):
+        raise ValueError('Make linked library objects local before baking')
+    saved = []
+    try:
+        # All modifiers can change the evaluated positions, shading, or UV layout.
+        # Only bake targets are changed; surrounding scene objects remain intact.
+        for ob in objects:
+            for mod in ob.modifiers:
+                saved.append((mod, mod.show_viewport, mod.show_render))
+                mod.show_viewport = False
+                mod.show_render = False
+        context.view_layer.update()
+        return _bake_selected_base(context)
+    finally:
+        for mod, viewport, render in saved:
+            mod.show_viewport = viewport
+            mod.show_render = render
+        context.view_layer.update()
+
+
+def _bake_selected_base(context):
     """Stage UVs/images on private meshes; publish only after the entire bake succeeds."""
     if context.mode != 'OBJECT':
         raise ValueError('Bake lightmaps in Object Mode')
@@ -52,10 +77,10 @@ def bake_selected(context):
         if not ob.data.polygons:
             raise ValueError(ob.name + ': mesh has no faces')
         if any(mod.type in topology_modifiers and (mod.show_viewport or mod.show_render) for mod in ob.modifiers):
-            raise ValueError(ob.name + ': apply topology-changing modifiers before lightmap baking')
+            raise ValueError(ob.name + ': modifiers could not be disabled for lightmap baking')
         evaluated = ob.evaluated_get(depsgraph).data
         if len(evaluated.loops) != len(ob.data.loops) or len(evaluated.vertices) != len(ob.data.vertices):
-            raise ValueError(ob.name + ': apply topology-changing modifiers before lightmap baking')
+            raise ValueError(ob.name + ': evaluated topology still differs from the base mesh')
         if any(mod.show_render != mod.show_viewport for mod in ob.modifiers):
             raise ValueError(ob.name + ': modifier viewport/render visibility must match for baking')
     scene = context.scene
@@ -273,6 +298,7 @@ class VLR_PT_lightmap(bpy.types.Panel):
             layout.label(text='Sun + Sky/Ground; emission retained')
             layout.label(text='Key Light excluded')
         layout.prop(settings, 'resolution'); layout.prop(settings, 'samples')
+        layout.label(text='Target modifiers disabled during bake', icon='INFO')
         layout.operator('vertex_lit.lightmap_bake')
         layout.operator('vertex_lit.lightmap_clear')
         ob = context.active_object

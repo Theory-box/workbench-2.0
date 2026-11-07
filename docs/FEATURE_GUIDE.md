@@ -238,8 +238,7 @@ for diffuse lighting in the viewport and F12. Original material UVs and scene
 settings are restored. AO, cavity, outline, and other existing effects are not
 disabled or overridden.
 
-Set up the scene lights/world for Cycles first. Apply topology-changing modifiers
-before baking; the operator warns and stops instead of applying them. The bake
+Set up the scene lights/world for Cycles first. Modifiers on selected bake targets are temporarily disabled during baking, then restored. The lightmap describes the base mesh; restored modifiers may stretch or repeat it. The bake
 is static: rebake after lighting or geometry changes. This is diffuse lighting,
 not a bake of metallic reflections or transmission. Collections/GN instances do
 not inherit the source object's position-specific lightmap. Shared meshes are
