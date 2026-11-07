@@ -149,7 +149,7 @@ class SSAO(ScreenEffect):
         self._key = None
 
     def enabled(self, vls):
-        return bool(getattr(vls, 'use_ao', False))
+        return bool(getattr(vls, 'use_ao', False)) and getattr(vls, 'ao_method', 'SSAO') == 'SSAO'
 
     def free(self):
         super().free()

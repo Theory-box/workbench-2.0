@@ -9,6 +9,7 @@ no changes.
 """
 from .pipeline import Pipeline
 from .ssao import SSAO
+from .gtao import GTAO
 from .cavity import Cavity
 from .outline import Outline
 from .fxaa import FXAA
@@ -17,7 +18,7 @@ from .contact import ContactShadows
 
 def default_effects():
     # order matters: AO + cavity shade the colour, outline draws lines, FXAA smooths last.
-    return [ContactShadows(), SSAO(), Cavity(), Outline(), FXAA()]
+    return [ContactShadows(), SSAO(), GTAO(), Cavity(), Outline(), FXAA()]
 
 
 def make_pipeline():

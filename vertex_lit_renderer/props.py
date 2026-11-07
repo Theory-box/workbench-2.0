@@ -211,6 +211,7 @@ class VertexLitSettings(bpy.types.PropertyGroup):
     use_ao: bpy.props.BoolProperty(
         name="Cavity World", default=False,
         description="World-space cavity (SSAO): darken crevices (valley), brighten exposed (ridge)")
+    ao_method: bpy.props.EnumProperty(name='Method', items=[('SSAO','Classic SSAO','Original AO'),('GTAO','XeGTAO (experimental)','GLSL adaptation of XeGTAO horizon integration with spatial denoising')], default='SSAO')
     ao_strength: bpy.props.FloatProperty(name="Valley", default=1.0, min=0.0, max=4.0)
     ao_ridge: bpy.props.FloatProperty(
         name="Ridge", default=0.0, min=0.0, max=4.0,

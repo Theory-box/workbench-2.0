@@ -149,6 +149,7 @@ class VERTEX_LIT_PT_settings(bpy.types.Panel):
         if cw is not None:
             cw.active = s.use_ao
             col = cw.column(align=True)
+            col.prop(s, 'ao_method')
             col.prop(s, 'ao_strength', text="Valley")
             col.prop(s, 'ao_ridge', text="Ridge")
             col.prop(s, 'ao_radius', text="Distance")

@@ -8,6 +8,17 @@ Experimental Blender renderer with live material-node previews, shadows, and scr
 
 Published version: **0.19.13 beta**. Development and primary tests use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum; the new features have not been validated on 4.2.
 
+Unpublished branch build **0.19.14** adds **Cavity World > Method > XeGTAO
+(experimental)**. Classic SSAO remains the default for existing scenes. This is
+a GLSL adaptation of XeGTAO's horizon integral with a custom depth-aware 5x5
+spatial filter, full-resolution depth sampling and fixed noise. It does not yet
+include the upstream depth-MIP optimization, temporal accumulation, bent normals,
+or all upstream heuristics. Perspective/orthographic F12, viewport switching,
+object/camera movement, alpha preservation, zero strength, parallax, AO exclusion,
+and supersampling smoke tests pass in Blender 4.4.3. Heavy-scene performance and
+ray-traced-reference accuracy remain unmeasured. MIT attribution is included in
+`vertex_lit_renderer/licenses/XeGTAO.txt`. Existing AO/ridge compositing is retained.
+
 The Parallax node now exposes
 **Shadow Height** under Sun Self-Shadow: 1.0 preserves existing shadows, values
 above 1 exaggerate shadow height, and 0 disables height-field sun occlusion.
