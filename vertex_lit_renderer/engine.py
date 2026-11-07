@@ -2208,6 +2208,9 @@ class VertexLitEngine(bpy.types.RenderEngine):
                         if gtex is not None:
                             try: sh.uniform_sampler(uni,gtex)
                             except Exception: pass
+                if prog.get('parallax_uv_matches'):
+                    from . import parallax
+                    parallax.bind_uvs(sh, prog, depsgraph, oname)
                 if baked is not None:
                     sh.uniform_sampler('uLightmap', baked_texture)
                 if chunks is None:

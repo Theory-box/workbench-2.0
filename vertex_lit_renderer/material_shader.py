@@ -43,8 +43,17 @@ def _heads(mode):
 
 def build_material_frag(mat, mode="PIXEL"):
     """Return (vertex_src, frag_src, transpile_result). No GPU needed."""
-    res = _nt.transpile_material(mat)
+    res = _nt.transpile_material(mat, parallax_enabled=True)
     vert, head, main, light = _heads(mode)
+    if "vlrParallaxOffset" in res.glsl:
+        if "in vec3 vWpos;" not in head:
+            head += "in vec3 vWpos;\n"
+        # Resolve the visible height intersection before evaluating its lighting.
+        lines = main.splitlines(True)
+        base = next(line for line in lines if 'computeBaseColor(vUV)' in line)
+        main = ''.join(line for line in lines if line != base)
+        main = main.replace('\n', '\n' + base, 1)
+        main = main.replace('normalize(vNrm)', 'vlrReliefNormal')
     for i, varying in enumerate(res.uv_maps.values()):
         vert = 'in vec2 namedUV%d;\nout vec2 %s;\n' % (i, varying) + vert
         vert = vert.replace('void main() {', 'void main() {\n    %s = namedUV%d;' % (varying, i))
@@ -91,6 +100,8 @@ def _compile(mat, mode):
         vert, frag, res = build_material_frag(mat, mode)
         ent["notes"] = res.notes
         ent["uv_maps"] = res.uv_maps
+        ent["parallax_uv_matches"] = getattr(res, "parallax_uv_matches", {})
+        ent["parallax_uv_map"] = getattr(res, "parallax_uv_map", None)
         ent["vert"] = vert
         # Diagnostic: how much of the graph the transpiler resolved. 0 samplers on
         # a material you expect to be textured => the image isn't in the Base Color

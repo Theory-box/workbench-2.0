@@ -6,7 +6,41 @@ Experimental Blender renderer with live material-node previews, shadows, and scr
 
 ## Status
 
-Current version: **0.19.3 beta**. Development and recent tests use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum; other versions have not been verified in this testing pass.
+Published version: **0.19.3 beta**. This branch is **0.19.4 parallax beta**, not a release. Development and primary tests use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum.
+
+## Parallax development branch (0.19.4 beta)
+
+This branch adds **Workbench 2.0 Parallax** to the Shader Editor Add menu/search.
+Connect a Non-Color height image to its **Height**, then connect its **Displacement**
+output to **Material Output > Displacement**. Keep the existing surface shader.
+Only the connected, unmuted node on the active Material Output enables the effect.
+
+- **Depth** is relief depth in world units. Start small (for example 0.01–0.05).
+- **Midlevel** is the original surface height: 0.5 centers relief; 1 recesses it.
+- **Quality** sets the maximum ray steps (8–128), followed by five refinement steps.
+- **UV Map** selects the affected map. Blank uses each mesh's render-active map.
+  Use that same map for the height and surface textures; Mapping/Vector Math scaling
+  remains part of those texture graphs. Implicit and named references to the same
+  active map move together. Height values are clamped to 0–1.
+
+The renderer traces the UV height field and derives relief normals for lighting.
+Color and alpha sampling on that map follows the intersection, in viewport and F12.
+Shared materials share the effect. Baked lightmap coordinates remain unchanged.
+Depth and quality edits use uniforms; they do not recompile the shader.
+
+This is apparent surface relief, not mesh displacement: silhouettes and cast shadows
+remain unchanged, and there is no relief self-shadowing. Extreme grazing angles fade
+out to avoid unbounded offsets. Use UV-based height graphs; Generated/Object/triplanar
+height coordinates are not supported by this first version. The custom node must be
+at material level (a reroute to the output is supported); nesting it inside a group
+is not supported. Existing planar reflection overlays/roughness evaluation are not
+parallax-warped. Camera-independent albedo baking deliberately excludes parallax.
+Other engines see a zero-displacement fallback, not equivalent relief.
+
+Validation covers small native GPU viewport/F12 tests, named/default UV aliases,
+scaled and mirrored UVs, perspective/orthographic cameras, nonuniform/mirrored object
+scales, Edit Mode UV changes, live parameters/muting, lightmap isolation, and save/reopen.
+Heavy-scene performance and other GPU vendors remain unverified.
 
 ## Changes in 0.19.3 beta
 

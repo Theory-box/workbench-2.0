@@ -82,6 +82,8 @@ class Param:
         if node is None:
             return 0.0
         try:
+            if self.kind == "property":
+                return getattr(node, self.index)
             if self.kind == "input":
                 return node.inputs[self.index].default_value
             if self.kind == "rgb":
@@ -137,6 +139,8 @@ class _Transpiler:
     def __init__(self):
         self.uv_maps = {}
         self.named_uvs = False
+        self.parallax_shift = None
+        self.parallax_uv_matches = {}
         self.lines = []
         self.samplers = []
         self.params = []
@@ -306,9 +310,19 @@ class _Transpiler:
 
     # =================== node handlers ===================================
 
+    def _uv_expr(self, name, source):
+        if self.parallax_shift is None:
+            return source
+        uniform = self.parallax_uv_matches.get(name)
+        if uniform is None:
+            uniform = 'uParallaxUV' + str(len(self.parallax_uv_matches))
+            self.parallax_uv_matches[name] = uniform
+            self.param_decls.append('uniform float ' + uniform + ';')
+        return '(' + source + ' + (' + self.parallax_shift + ') * ' + uniform + ')'
+
     def _n_tex_coord(self, node, out):
         name = out.name
-        if name == "UV":        return "vec4(vUV, 0.0, 1.0)"
+        if name == "UV":        return "vec4(" + self._uv_expr("", "vUV") + ", 0.0, 1.0)"
         if name == "Generated": return "vec4(vGenerated, 1.0)"
         if name == "Object":    return "vec4(vObjPos, 1.0)"
         # Normal/Camera/Window/Reflection need view/normal data not available in
@@ -320,8 +334,8 @@ class _Transpiler:
         name = getattr(node, 'uv_map', '')
         if name and self.named_uvs:
             varying = self.uv_maps.setdefault(name, 'vNamedUV' + str(len(self.uv_maps)))
-            return 'vec4({}, 0.0, 1.0)'.format(varying)
-        return "vec4(vUV, 0.0, 1.0)"
+            return 'vec4({}, 0.0, 1.0)'.format(self._uv_expr(name, varying))
+        return "vec4(" + self._uv_expr("", "vUV") + ", 0.0, 1.0)"
 
     def _n_mapping(self, node, out):
         vec = self.input_expr(node, node.inputs.get("Vector"), "vec3")
@@ -388,7 +402,7 @@ class _Transpiler:
         if vsock is not None and vsock.is_linked:
             coords = self.input_expr(node, vsock, "vec2")
         else:
-            coords = "vUV"
+            coords = self._uv_expr("", "vUV")
         if img is None:
             self.notes.append("TEX_IMAGE '{}' has no image".format(node.name))
             return MAGENTA
@@ -1162,7 +1176,7 @@ def _find_base_socket(mat):
     return None   # no shader on Surface -> caller falls back to legacy texture path
 
 
-def transpile_material(mat):
+def transpile_material(mat, parallax_enabled=False):
     res = TranspileResult()
     if not mat or not getattr(mat, "use_nodes", False):
         dc = list(getattr(mat, "diffuse_color", (0.8, 0.8, 0.8, 1.0))) if mat else [0.8, 0.8, 0.8, 1.0]
@@ -1176,6 +1190,13 @@ def transpile_material(mat):
     base = _find_base_socket(mat)
     t = _Transpiler()
     t.named_uvs = True
+    parallax_glsl = ""
+    parallax_source = None
+    if parallax_enabled:
+        from . import parallax
+        node = parallax.active_node(mat)
+        if node is not None:
+            parallax_source, parallax_glsl = parallax.compile_height(t, node)
     if base is None:
         # Surface isn't a shape we can trace to a base colour (Mix Shader, node
         # group, Add Shader, empty surface, ...). Signal the engine to use the
@@ -1204,10 +1225,13 @@ def transpile_material(mat):
             pass
 
     body = "\n    ".join(t.lines)
-    res.glsl = ("vec4 computeBaseColor(vec2 vUV) {\n"
+    res.glsl = (parallax_glsl + "vec4 computeBaseColor(vec2 vUV) {\n"
+                + ("    vec2 vlrOffset = vlrParallaxOffset(" + parallax_source + ");\n" if parallax_source else "")
                 + ("    " + body + "\n" if body else "")
                 + "    return {};\n".format(body_expr) + "}")
     res.uv_maps = t.uv_maps
+    res.parallax_uv_matches = t.parallax_uv_matches
+    res.parallax_uv_map = node.uv_map if parallax_source else None
     res.samplers = t.samplers
     res.params = t.params
     res.param_decls = t.param_decls
@@ -1281,6 +1305,8 @@ def _tree_sig(nt, seen):
 def _variant(n):
     t = n.type
     v = []
+    if n.bl_idname == "VLRShaderNodeParallax":
+        return "VLR_PARALLAX|" + n.uv_map
     if t in ("OUTPUT_MATERIAL", "GROUP_OUTPUT"):
         v = [str(getattr(n, 'is_active_output', False))]
     elif t == "MATH": v = [getattr(n, "operation", ""), str(getattr(n, "use_clamp", False))]
