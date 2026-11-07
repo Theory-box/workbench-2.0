@@ -2,8 +2,6 @@
 import bpy
 import math
 
-_active_bake = None
-
 
 class VLRLightmapSettings(bpy.types.PropertyGroup):
     keep_live_lighting: bpy.props.BoolProperty(name='Keep Live Lighting', default=True,
@@ -25,9 +23,9 @@ class VLRLightmapState(bpy.types.PropertyGroup):
     status: bpy.props.StringProperty(default='Not baked')
 
 
-def _cycles_bake(uv_name, margin, passes='BOTH', execution='EXEC_DEFAULT'):
+def _cycles_bake(uv_name, margin, passes='BOTH'):
     selected_passes = {'DIRECT', 'INDIRECT'} if passes == 'BOTH' else {passes}
-    return bpy.ops.object.bake(execution, type='DIFFUSE', pass_filter=selected_passes,
+    return bpy.ops.object.bake(type='DIFFUSE', pass_filter=selected_passes,
                               target='IMAGE_TEXTURES', save_mode='INTERNAL',
                               uv_layer=uv_name, use_selected_to_active=False,
                               use_clear=True, margin=margin, margin_type='EXTEND')
@@ -43,20 +41,6 @@ def _temporary_material(original):
 
 
 def bake_selected(context):
-    """Synchronous entry point for background scripts and regression tests."""
-    steps = _bake_steps(context)
-    result = None
-    try:
-        while True:
-            request = steps.send(result)
-            result = _cycles_bake(*request) if request is not None else None
-    except StopIteration as done:
-        return done.value
-    finally:
-        steps.close()
-
-
-def _bake_steps(context):
     """Bake base meshes and restore modifier visibility even if staging/cleanup fails."""
     objects = [ob for ob in context.selected_objects if ob.type == 'MESH']
     if context.mode != 'OBJECT':
@@ -73,7 +57,7 @@ def _bake_steps(context):
                 mod.show_viewport = False
                 mod.show_render = False
         context.view_layer.update()
-        return (yield from _bake_selected_base(context))
+        return _bake_selected_base(context)
     finally:
         for mod, viewport, render in saved:
             mod.show_viewport = viewport
@@ -187,8 +171,6 @@ def _bake_selected_base(context):
                     for node in material.node_tree.nodes: node.select = False
                     target.select = True; material.node_tree.nodes.active = target
                 slot.link = 'DATA'; slot.material = material
-            # Give the UI a redraw between object preparations.
-            yield None
         # Keep staging transactional, but batch only targets with matching settings.
         groups = {}
         for record in staged: groups.setdefault(record['config'], []).append(record)
@@ -201,7 +183,7 @@ def _bake_selected_base(context):
             context.view_layer.objects.active = records[0]['object']
             with lighting_source(scene, source):
                 context.view_layer.update()
-                if (yield (uv_name, records[0]['margin'], passes)) != {'FINISHED'}:
+                if _cycles_bake(uv_name, records[0]['margin'], passes) != {'FINISHED'}:
                     raise RuntimeError('Cycles lightmap bake was cancelled')
         for record in staged:
             record['image'].pack()
@@ -266,85 +248,9 @@ class VLR_OT_lightmap_bake(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return _active_bake is None and not bpy.app.is_job_running('OBJECT_BAKE') and context.mode == 'OBJECT' and any(ob.type == 'MESH' for ob in context.selected_objects)
-
-    def invoke(self, context, event):
-        if bpy.app.background:
-            return self.execute(context)
-        global _active_bake
-        _active_bake = self
-        self._steps = _bake_steps(context)
-        self._waiting = False
-        self._result = None
-        self._cancelled = False
-        self._done_handler = lambda *args: self._job_done(False)
-        self._cancel_handler = lambda *args: self._job_done(True)
-        bpy.app.handlers.object_bake_complete.append(self._done_handler)
-        bpy.app.handlers.object_bake_cancel.append(self._cancel_handler)
-        self._timer = context.window_manager.event_timer_add(0.1, window=context.window)
-        context.window_manager.modal_handler_add(self)
-        context.workspace.status_text_set('Preparing lightmaps — Esc to cancel')
-        return {'RUNNING_MODAL'}
-
-    def _job_done(self, cancelled):
-        # Completion handlers run before Blender frees the job. Do not restore here.
-        self._result = {'CANCELLED'} if cancelled else {'FINISHED'}
-        self._cancelled |= cancelled
-
-    def _finish(self, context, count=None, error=None):
-        global _active_bake
-        try:
-            self._steps.close()
-        finally:
-            for handlers, callback in (
-                    (bpy.app.handlers.object_bake_complete, self._done_handler),
-                    (bpy.app.handlers.object_bake_cancel, self._cancel_handler)):
-                if callback in handlers: handlers.remove(callback)
-            context.window_manager.event_timer_remove(self._timer)
-            context.workspace.status_text_set(None)
-            _active_bake = None
-        if error:
-            self.report({'WARNING'}, str(error))
-            return {'CANCELLED'}
-        self.report({'INFO'}, 'Baked lightmaps for ' + str(count) + ' object(s)')
-        return {'FINISHED'}
-
-    def modal(self, context, event):
-        if event.type == 'ESC':
-            self._cancelled = True
-            if bpy.app.is_job_running('OBJECT_BAKE'):
-                return {'PASS_THROUGH'}
-        if event.type != 'TIMER':
-            # Draw normally, but prevent editing the temporarily staged scene.
-            return {'RUNNING_MODAL'}
-        if bpy.app.is_job_running('OBJECT_BAKE'):
-            return {'PASS_THROUGH'}
-        if self._cancelled:
-            return self._finish(context, error='Lightmap bake cancelled; previous bakes restored')
-        try:
-            if self._waiting and self._result is None:
-                raise RuntimeError('Cycles bake ended without a completion result')
-            request = self._steps.send(self._result)
-            self._result = None
-            self._waiting = False
-            if request is not None:
-                context.workspace.status_text_set('Baking lightmaps — Esc to cancel')
-                result = _cycles_bake(*request, execution='INVOKE_DEFAULT')
-                if result == {'RUNNING_MODAL'}:
-                    self._waiting = True
-                elif result == {'FINISHED'}:
-                    self._result = result
-                else:
-                    raise RuntimeError('Cycles could not start the lightmap bake')
-        except StopIteration as done:
-            return self._finish(context, count=done.value)
-        except Exception as exc:
-            return self._finish(context, error=exc)
-        return {'RUNNING_MODAL'}
+        return context.mode == 'OBJECT' and any(ob.type == 'MESH' for ob in context.selected_objects)
 
     def execute(self, context):
-        if not bpy.app.background:
-            return self.invoke(context, None)
         try:
             count = bake_selected(context)
         except ValueError as exc:
@@ -363,7 +269,7 @@ class VLR_OT_lightmap_clear(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return _active_bake is None and not bpy.app.is_job_running('OBJECT_BAKE') and context.mode == 'OBJECT' and any(ob.type == 'MESH' and ob.vlr_lightmap.image for ob in context.selected_objects)
+        return context.mode == 'OBJECT' and any(ob.type == 'MESH' and ob.vlr_lightmap.image for ob in context.selected_objects)
 
     def execute(self, context):
         objects = [ob for ob in context.selected_objects if ob.type == 'MESH' and ob.vlr_lightmap.image]
@@ -402,9 +308,6 @@ class VLR_PT_lightmap(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
-        if _active_bake is not None:
-            layout.label(text='Baking lightmaps — Esc to cancel', icon='TIME')
-            return
         ob = context.active_object
         if ob is None or ob.type != 'MESH':
             layout.label(text='Select a mesh to edit bake settings')
