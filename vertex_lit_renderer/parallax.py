@@ -56,6 +56,8 @@ class VLRShaderNodeParallax(bpy.types.ShaderNodeCustomGroup):
             layout.prop(self, 'shadow_height')
             layout.prop(self, 'shadow_steps')
         layout.prop(self, 'self_ao')
+        if context.material is not None:
+            layout.prop(context.material, 'vlr_scene_ao', slider=True)
         obj = context.object
         if obj is not None and obj.type == 'MESH':
             layout.prop_search(self, 'uv_map', obj.data, 'uv_layers')

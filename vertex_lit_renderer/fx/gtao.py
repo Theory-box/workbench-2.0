@@ -78,7 +78,7 @@ void main(){
 '''
 
 APPLY = '''
-uniform sampler2D uColor,uAO;
+uniform sampler2D uColor,uAO,uAOMask;
 uniform float uStrength,uRidge;
 in vec2 vUV;out vec4 fragColor;
 void main(){
@@ -94,7 +94,8 @@ void main(){
   value+=a.xy*w;weightSum+=w;
  }
  value/=max(weightSum,1e-8);
- fragColor=vec4(c.rgb*clamp(1.0-value.x*uStrength,0.0,1.0)*(1.0+value.y*uRidge),c.a);
+ float amount=texture(uAOMask,vUV).a;
+ fragColor=vec4(c.rgb*mix(1.0,clamp(1.0-value.x*uStrength,0.0,1.0),amount)*(1.0+value.y*uRidge*amount),c.a);
 }
 '''
 

@@ -1990,6 +1990,7 @@ class VertexLitEngine(bpy.types.RenderEngine):
         si('uUseShadow', 1 if do_shad else 0)
         sf('uShadowBias', s_bias); sf('uShadowSoft', s_dark); ss('uShadowMap', shad_tex)
         sf('uShadowTexelWorld', getattr(self, '_shadow_texel', 0.0))
+        sf('uSceneAO', 1.0)
         si('uNumLights', len(lights))
         for i in range(8):
             l=lights[i] if i<len(lights) else None
@@ -2202,6 +2203,8 @@ class VertexLitEngine(bpy.types.RenderEngine):
                 rebind_samplers = (last_shader[0] is not sh or binding_changed
                                    or blur_domains_bound.get(id(sh)) != blur_domain_key)
                 _ensure_frame(sh)
+                try: sh.uniform_float('uSceneAO', getattr(mat, 'vlr_scene_ao', 1.0))
+                except ValueError: pass
                 if aux_on:
                     try:
                         if chunks is None: sh.uniform_float('uObjId', objid)
@@ -2255,6 +2258,8 @@ class VertexLitEngine(bpy.types.RenderEngine):
             else:
                 sh = instance_shader if instance_shader is not None else legacy
                 _ensure_frame(sh)
+                try: sh.uniform_float('uSceneAO', getattr(mat, 'vlr_scene_ao', 1.0))
+                except ValueError: pass
                 if aux_on:
                     try:
                         if chunks is None: sh.uniform_float('uObjId', objid)
@@ -2512,7 +2517,7 @@ class VertexLitEngine(bpy.types.RenderEngine):
         # Avoid subtracting mesh sunlight from their overlaid colors.
         from . import splat_render
         contact = contact and not (splat_render.SCENE_CLOUDS or getattr(self, '_splat_anchors', []))
-        want_aux = bool(contact or (vls and (getattr(vls, 'use_outline', False) or getattr(vls, 'use_cavity', False))))
+        want_aux = bool(contact or (vls and (getattr(vls, 'use_ao', False) or getattr(vls, 'use_outline', False) or getattr(vls, 'use_cavity', False))))
         self._aux_active = want_aux
 
         ids_cb = None

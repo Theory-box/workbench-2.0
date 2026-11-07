@@ -271,7 +271,20 @@ class VERTEX_LIT_PT_object(bpy.types.Panel):
         sub.prop(ob, 'vlr_ao_exclude', text="Cavity World")
 
 
+class VERTEX_LIT_PT_material(bpy.types.Panel):
+    bl_label = 'Workbench 2.0'
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = 'material'
+    @classmethod
+    def poll(cls, context):
+        return context.scene.render.engine == 'VERTEX_LIT' and context.material is not None
+    def draw(self, context):
+        self.layout.prop(context.material, 'vlr_scene_ao', slider=True)
+
+
 _CLASSES = (
+    VERTEX_LIT_PT_material,
     VERTEX_LIT_PT_settings,
     VERTEX_LIT_PT_object,
 )

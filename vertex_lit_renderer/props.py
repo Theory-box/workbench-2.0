@@ -257,9 +257,19 @@ class VertexLitSettings(bpy.types.PropertyGroup):
         name="Light Energy Scale", default=0.01, min=0.0001, max=10.0)
 
 
+def _material_ao_changed(self, context):
+    self.update_tag()
+    for screen in bpy.data.screens:
+        for area in screen.areas:
+            if area.type in {'VIEW_3D', 'NODE_EDITOR', 'PROPERTIES'}:
+                area.tag_redraw()
+
+
 def register():
     bpy.utils.register_class(VertexLitSettings)
     bpy.types.Scene.vertex_lit = bpy.props.PointerProperty(type=VertexLitSettings)
+    bpy.types.Material.vlr_scene_ao = bpy.props.FloatProperty(name='Scene AO', default=1.0, min=0.0, max=1.0, update=_material_ao_changed,
+        description='Scene AO reception: 0 disables, 1 full strength. Separate from Height AO; still casts occlusion')
     bpy.types.Object.vlr_ao_exclude = bpy.props.BoolProperty(
         name="Exclude from Cavity World", default=False,
         description="This object won't cast or receive world cavity (AO)")
@@ -269,6 +279,7 @@ def register():
 
 
 def unregister():
+    del bpy.types.Material.vlr_scene_ao
     del bpy.types.Object.vlr_ao_exclude
     del bpy.types.Object.vlr_outline_exclude
     del bpy.types.Scene.vertex_lit

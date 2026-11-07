@@ -130,10 +130,11 @@ vec3 vlrSunOutput = vec3(0.0);
 uniform mat3 uViewMat3;
 uniform vec3 uObjId;
 uniform float uAuxA;
+uniform float uSceneAO;
 void vlr_write_aux(vec3 N){
     /* exactly what the old NORMAL pass wrote: view normal, no camera-facing flip */
     outNormalG = vec4(normalize(uViewMat3 * N) * 0.5 + 0.5, uAuxA);
-    outIdG = vec4(uObjId, uAuxA);
+    outIdG = vec4(uObjId, uAuxA * uSceneAO);
     outSunG = vec4(vlrSunOutput, 1.0);
 }
 """

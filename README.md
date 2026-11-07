@@ -8,7 +8,7 @@ Experimental Blender renderer with live material-node previews, shadows, and scr
 
 Published version: **0.19.13 beta**. Development and primary tests use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum; the new features have not been validated on 4.2.
 
-Unpublished branch build **0.19.14** adds **Cavity World > Method > XeGTAO
+Unpublished branch build **0.19.15** adds **Cavity World > Method > XeGTAO
 (experimental)**. Classic SSAO remains the default for existing scenes. This is
 a GLSL adaptation of XeGTAO's horizon integral with a custom depth-aware 5x5
 spatial filter, full-resolution depth sampling and fixed noise. It does not yet
@@ -18,6 +18,15 @@ object/camera movement, alpha preservation, zero strength, parallax, AO exclusio
 and supersampling smoke tests pass in Blender 4.4.3. Heavy-scene performance and
 ray-traced-reference accuracy remain unmeasured. MIT attribution is included in
 `vertex_lit_renderer/licenses/XeGTAO.txt`. Existing AO/ridge compositing is retained.
+
+Materials have a **Scene AO** reception slider (0–1) in Material Properties >
+Workbench 2.0 and on the Parallax node. It scales scene AO and its World Ridge
+component for that material, for both Classic SSAO and experimental XeGTAO.
+It does not disable casting AO, Height AO, Cavity Screen, or contact shadows.
+Shared materials share this setting. It applies to opaque material rendering;
+transparent overlays and non-textured diagnostic view modes retain their existing
+scene-wide behavior. The existing object-ID buffer's alpha carries the mask, so
+AO now enables the auxiliary buffers even without outlines/cavity/contact shadows.
 
 The Parallax node now exposes
 **Shadow Height** under Sun Self-Shadow: 1.0 preserves existing shadows, values

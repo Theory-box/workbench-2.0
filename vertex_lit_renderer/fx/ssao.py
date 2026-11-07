@@ -122,6 +122,7 @@ void main(){
 _APPLY_FRAG = """
 uniform sampler2D uColor;
 uniform sampler2D uAO;
+uniform sampler2D uAOMask;
 uniform float uStrength;
 uniform float uRidge;
 in vec2 vUV;
@@ -130,8 +131,9 @@ void main(){
     vec4 col = texture(uColor, vUV);
     if(any(isnan(col)) || any(isinf(col))) col = vec4(0.0, 0.0, 0.0, 1.0);
     vec4 a = texture(uAO, vUV);
-    float ao = clamp(1.0 - a.x * uStrength, 0.0, 1.0);
-    float ridge = a.y * uRidge;
+    float amount = texture(uAOMask, vUV).a;
+    float ao = mix(1.0, clamp(1.0 - a.x * uStrength, 0.0, 1.0), amount);
+    float ridge = a.y * uRidge * amount;
     fragColor = vec4(col.rgb * ao * (1.0 + ridge), col.a);
 }
 """
@@ -199,6 +201,7 @@ class SSAO(ScreenEffect):
     def _apply(self, color_tex, ctx, ao_tex):
         sh=self.shader();sh.bind()
         sh.uniform_sampler('uColor',color_tex);sh.uniform_sampler('uAO',ao_tex)
+        sh.uniform_sampler('uAOMask',ctx['id_tex'])
         sh.uniform_float('uStrength',ctx.get('ao_strength',1.0));sh.uniform_float('uRidge',ctx.get('ao_ridge',0))
         self._batch.draw(sh)
 
