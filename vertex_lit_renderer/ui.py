@@ -141,6 +141,9 @@ class VERTEX_LIT_PT_settings(bpy.types.Panel):
             return
         body.prop(s, 'backface_cull')
         body.prop(s, 'use_parallax')
+        row = body.row()
+        row.active = s.use_parallax
+        row.prop(s, 'quick_navigation')
 
         outline = section(body, "VLR_outline", "Outline", default_closed=True,
                           toggle_owner=s, toggle='use_outline')

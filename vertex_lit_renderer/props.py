@@ -42,6 +42,8 @@ def _view_mode_update(self, context):
 
 
 class VertexLitSettings(bpy.types.PropertyGroup):
+    quick_navigation: bpy.props.BoolProperty(name="Quick Navigation", default=False,
+        description="Temporarily disable parallax during viewport navigation, transforms, Edit Mode geometry changes and viewport playback; restore after a short pause. Final still and animation renders remain full quality")
 
     use_parallax: bpy.props.BoolProperty(
         name="Parallax", default=True,

@@ -1297,6 +1297,8 @@ class VertexLitEngine(bpy.types.RenderEngine):
                          (not getattr(self, '_scene_records_dirty', True) or
                           bool(getattr(self, '_pending_transforms', None))))
         updates = list(depsgraph.updates)
+        from . import quick_navigation
+        quick_navigation.note_updates(self, updates)
         self._scene_records_dirty = True
         self._stoch_epoch = getattr(self, '_stoch_epoch', 0) + 1   # scene changed: restart splat refinement
 
@@ -2215,7 +2217,7 @@ class VertexLitEngine(bpy.types.RenderEngine):
                     for p in prog['params']:
                         try:
                             value = p.value(nt)
-                            if p.uniform == 'uParallax_depth' and vls is not None and not vls.use_parallax:
+                            if p.uniform == 'uParallax_depth' and vls is not None and (not vls.use_parallax or getattr(self, '_quick_parallax', False)):
                                 value = 0.0
                             sh.uniform_float(p.uniform, value)
                         except Exception: pass
@@ -2620,6 +2622,12 @@ class VertexLitEngine(bpy.types.RenderEngine):
         return _draw_objects, post_ctx
 
     def view_draw(self, context, depsgraph):
+        try:
+            self._view_draw(context, depsgraph)
+        finally:
+            self._quick_parallax = False
+
+    def _view_draw(self, context, depsgraph):
         self._ensure_state()
         self._ensure_resources()
 
@@ -2663,6 +2671,8 @@ class VertexLitEngine(bpy.types.RenderEngine):
             self._shadow_dirty = False
 
         region=context.region; rv3d=context.region_data
+        from . import quick_navigation
+        quick_navigation.update(self, context, vls)
         center,radius=self._bounds_cache
         if do_shad:
             sdist = getattr(vls, 'shadow_distance', 25.0) if vls else 25.0
