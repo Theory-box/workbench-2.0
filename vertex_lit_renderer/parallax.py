@@ -29,6 +29,8 @@ class VLRShaderNodeParallax(bpy.types.ShaderNodeCustomGroup):
     self_shadow: BoolProperty(name='Sun Self-Shadow', default=True, update=changed)
     self_ao: BoolProperty(name='Height AO', default=True, description='Include height relief in Cavity World AO; uses the scene AO controls', update=changed)
     shadow_steps: IntProperty(name='Shadow Quality', default=24, min=8, max=128, update=changed)
+    shadow_height: FloatProperty(name='Shadow Height', default=1.0, min=0.0, max=20.0, soft_max=4.0,
+        description='Sun self-shadow height multiplier only; 1 preserves normal shadows, 0 disables them. Does not change visible relief or AO', update=changed)
     uv_map: StringProperty(name='UV Map', description='Blank uses render-active UV; match the height texture UV map', update=changed)
 
     def init(self, context):
@@ -47,7 +49,9 @@ class VLRShaderNodeParallax(bpy.types.ShaderNodeCustomGroup):
     def draw_buttons(self, context, layout):
         layout.prop(self, 'depth'); layout.prop(self, 'midlevel'); layout.prop(self, 'steps')
         layout.prop(self, 'self_shadow')
-        if self.self_shadow: layout.prop(self, 'shadow_steps')
+        if self.self_shadow:
+            layout.prop(self, 'shadow_height')
+            layout.prop(self, 'shadow_steps')
         layout.prop(self, 'self_ao')
         obj = context.object
         if obj is not None and obj.type == 'MESH':
@@ -104,7 +108,7 @@ def compile_height(t, node):
     body = re.sub(r'vec4 n_\w+ = texture\((uTx_\d+), ([^;]+)\);', sample, body)
     function = ('\n'.join(gradients) + '\nfloat vlrHeight(vec2 vlrUV, bool setup) {\n' + body
                 + '\nreturn clamp(' + height + ', 0.0, 1.0);\n}\n')
-    for prop in ('depth', 'midlevel', 'steps', 'self_shadow', 'shadow_steps', 'self_ao'):
+    for prop in ('depth', 'midlevel', 'steps', 'self_shadow', 'shadow_steps', 'shadow_height', 'self_ao'):
         name = 'uParallax_' + prop
         from .node_transpiler import Param
         t.params.append(Param(name, 'float', node.name, 'property', prop))
@@ -158,13 +162,14 @@ float vlrReliefAOFactor() {
 }
 // Direction-independent height-field visibility; only sunlight consumes it for now.
 float vlrReliefVisibility(vec3 L) {
-    if (uParallax_self_shadow < 0.5 || vlrReliefDepth <= 0.0) return 1.0;
+    float shadowDepth = vlrReliefDepth * uParallax_shadow_height;
+    if (uParallax_self_shadow < 0.5 || shadowDepth <= 0.0) return 1.0;
     float facing = dot(L, vlrReliefN);
     if (facing <= 0.001) return 0.0;
     float h = vlrHeight(vlrReliefHit, false);
     float travel = 1.0 - h;
     if (travel < 0.0001) return 1.0;
-    vec2 slope = vec2(dot(L,vlrReliefU),dot(L,vlrReliefV)) * vlrReliefDepth / facing;
+    vec2 slope = vec2(dot(L,vlrReliefU),dot(L,vlrReliefV)) * shadowDepth / facing;
     int count = int(clamp(uParallax_shadow_steps,8.0,128.0));
     for (int i=1; i<=128; ++i) {
         if (i>count) break;

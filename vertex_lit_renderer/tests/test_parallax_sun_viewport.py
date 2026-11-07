@@ -14,6 +14,9 @@ def change():
  if stage==1:n.self_shadow=True
  if stage==2:bpy.context.scene.vertex_lit.sun_azimuth=-1.570796
  if stage==3:n.self_shadow=False
+ if stage==4:n.self_shadow=True
+ if stage==5:n.shadow_height=.25
+ if stage==6:n.shadow_height=3
 def draw(self,context,dg):
  global frames,pending
  try:
@@ -26,7 +29,7 @@ def draw(self,context,dg):
   px=np.asarray(b).reshape(h,w,4).copy();assert np.isfinite(px).all()
   if captures:assert np.count_nonzero(np.max(abs(px-captures[-1]),axis=2)>.01)>100
   captures.append(px);pending=True
-  if stage<3:bpy.app.timers.register(change,first_interval=.1)
+  if stage<6:bpy.app.timers.register(change,first_interval=.1)
   else:bpy.app.timers.register(lambda:finish(),first_interval=.1)
  except Exception:
   error=traceback.format_exc();bpy.app.timers.register(lambda:finish(error),first_interval=.1)

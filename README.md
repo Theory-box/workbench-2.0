@@ -8,6 +8,12 @@ Experimental Blender renderer with live material-node previews, shadows, and scr
 
 Published version: **0.19.11 beta**. Development and primary tests use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum; the new features have not been validated on 4.2.
 
+This branch is an unpublished **0.19.12** test build. The Parallax node now exposes
+**Shadow Height** under Sun Self-Shadow: 1.0 preserves existing shadows, values
+above 1 exaggerate shadow height, and 0 disables height-field sun occlusion.
+It updates live without changing Depth, visible relief, normals, or height AO.
+Large multipliers may need higher Shadow Quality to avoid missing thin features.
+
 This release includes material parallax, height-field sun self-shadowing and AO,
 UV graph Blur caches, extended-UV alignment fixes, shared full-resolution caches
 for periodic textures, live Color Ramp position/color edits, and opt-in screen-space
