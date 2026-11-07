@@ -43,7 +43,14 @@ def _view_mode_update(self, context):
 
 class VertexLitSettings(bpy.types.PropertyGroup):
 
+    use_parallax: bpy.props.BoolProperty(
+        name="Parallax", default=True,
+        description="Enable material parallax, including depth intersections, height AO and sun self-shadowing")
+
     # ── Lighting ────────────────────────────────────────────────────────────
+    use_key_light: bpy.props.BoolProperty(name="Key Light", default=True)
+    use_sky_ground: bpy.props.BoolProperty(name="Sky / Ground", default=True)
+    use_sun: bpy.props.BoolProperty(name="Sun", default=True)
     # Hemisphere fill: low-frequency sky/ground ambient. (Matcaps land here later.)
     hemi_intensity: bpy.props.FloatProperty(
         name="Sky/Ground", default=1.0, min=0.0, max=4.0,

@@ -57,18 +57,23 @@ class VERTEX_LIT_PT_settings(bpy.types.Panel):
         body = section(root, "VLR_lighting", "Lighting")
         if body is None:
             return
-        body.prop(s, 'key_intensity')   # camera headlamp
+        key = section(body, "VLR_key", "Key Light", toggle_owner=s, toggle='use_key_light')
+        if key is not None:
+            key.active = s.use_key_light
+            key.prop(s, 'key_intensity')
 
-        sky = section(body, "VLR_skyground", "Sky / Ground")
+        sky = section(body, "VLR_skyground", "Sky / Ground", toggle_owner=s, toggle='use_sky_ground')
         if sky is not None:
+            sky.active = s.use_sky_ground
             col = sky.column(align=True)
             col.prop(s, 'hemi_intensity')
             row = col.row(align=True)
             row.prop(s, 'sky_color')
             row.prop(s, 'ground_color')
 
-        sun = section(body, "VLR_sun", "Sun")
+        sun = section(body, "VLR_sun", "Sun", toggle_owner=s, toggle='use_sun')
         if sun is not None:
+            sun.active = s.use_sun
             col = sun.column(align=True)
             col.prop(s, 'sun_intensity')
             col.prop(s, 'sun_color', text="")
@@ -135,6 +140,7 @@ class VERTEX_LIT_PT_settings(bpy.types.Panel):
         if body is None:
             return
         body.prop(s, 'backface_cull')
+        body.prop(s, 'use_parallax')
 
         outline = section(body, "VLR_outline", "Outline", default_closed=True,
                           toggle_owner=s, toggle='use_outline')

@@ -247,7 +247,7 @@ def capture(engine, depsgraph, obj):
         engine._sun = render._compute_sun(settings)
         sky, ground = tuple(settings.sky_color), tuple(settings.ground_color)
         key = Vector((.25,.35,.90)).normalized()
-        studio = (tuple(camera.matrix_world.to_quaternion() @ key), (1,1,1), settings.key_intensity)
+        studio = (tuple(camera.matrix_world.to_quaternion() @ key), (1,1,1), settings.key_intensity if settings.use_key_light else 0.0)
         do_shadow = settings.use_shadows and engine._sun[2] > 0
         light_matrix = Matrix.Identity(4); shadow = engine._dummy_depth
         engine._shadow_texel = 0

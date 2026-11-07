@@ -75,8 +75,8 @@ def _compute_sun(vls):
     az = getattr(vls, 'sun_azimuth', 0.785398)
     ce = math.cos(el)
     d = (ce * math.sin(az), ce * math.cos(az), math.sin(el))   # direction TO the sun
-    return (d, tuple(vls.sun_color), float(vls.sun_intensity),
-            float(getattr(vls, 'hemi_intensity', 1.0)))
+    return (d, tuple(vls.sun_color), float(vls.sun_intensity) if vls.use_sun else 0.0,
+            float(getattr(vls, 'hemi_intensity', 1.0)) if vls.use_sky_ground else 0.0)
 
 
 def _material_transparent(mat):
@@ -1176,7 +1176,7 @@ class VertexLitEngine(bpy.types.RenderEngine):
                 key_dir = tuple(cam_eval.matrix_world.to_quaternion() @ kv)
             except Exception:
                 key_dir = (0.3, 0.4, 0.86)
-            studio = (key_dir, (1.0, 1.0, 1.0), (vls.key_intensity if vls else 0.8))
+            studio = (key_dir, (1.0, 1.0, 1.0), ((vls.key_intensity if vls.use_key_light else 0.0) if vls else 0.8))
             sky = tuple(vls.sky_color) if vls else (0.6, 0.68, 0.78)
             ground = tuple(vls.ground_color) if vls else (0.2, 0.18, 0.16)
 
@@ -2213,7 +2213,11 @@ class VertexLitEngine(bpy.types.RenderEngine):
                 if binding_changed:
                     nt=mat.node_tree if mat else None
                     for p in prog['params']:
-                        try: sh.uniform_float(p.uniform, p.value(nt))
+                        try:
+                            value = p.value(nt)
+                            if p.uniform == 'uParallax_depth' and vls is not None and not vls.use_parallax:
+                                value = 0.0
+                            sh.uniform_float(p.uniform, value)
                         except Exception: pass
                     params_bound[id(sh)] = prog
                 if rebind_samplers:
@@ -2711,7 +2715,7 @@ class VertexLitEngine(bpy.types.RenderEngine):
             key_dir=tuple(rv3d.view_rotation @ kv)
         except Exception:
             key_dir=(0.3,0.4,0.86)
-        studio=(key_dir, (1.0,1.0,1.0), (vls.key_intensity if vls else 0.8))
+        studio=(key_dir, (1.0,1.0,1.0), ((vls.key_intensity if vls.use_key_light else 0.0) if vls else 0.8))
         # experimental splat clouds: cache matrices + scene lighting for the draw.
         # The EWA ellipse projection assumes a PERSPECTIVE view (Jacobian ~ f/z); in an
         # orthographic viewport the splat sizes would be wrong, so skip splats there

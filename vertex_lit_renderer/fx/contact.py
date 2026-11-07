@@ -8,7 +8,7 @@ from .effect import ScreenEffect
 
 def enabled(vls):
     return bool(vls and getattr(vls, 'use_contact_shadows', False)
-                and getattr(vls, 'sun_intensity', 0) > 0
+                and getattr(vls, 'use_sun', True) and getattr(vls, 'sun_intensity', 0) > 0
                 and getattr(vls, 'view_mode', 'TEXTURED') not in ('NORMAL', 'DEPTH'))
 
 
