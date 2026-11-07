@@ -27,6 +27,7 @@ class VLRShaderNodeParallax(bpy.types.ShaderNodeCustomGroup):
     steps: IntProperty(name='Quality', default=32, min=8, max=128,
                        description='Maximum ray steps; higher values cost more GPU time', update=changed)
     self_shadow: BoolProperty(name='Sun Self-Shadow', default=True, update=changed)
+    self_ao: BoolProperty(name='Height AO', default=True, description='Include height relief in Cavity World AO; uses the scene AO controls', update=changed)
     shadow_steps: IntProperty(name='Shadow Quality', default=24, min=8, max=128, update=changed)
     uv_map: StringProperty(name='UV Map', description='Blank uses render-active UV; match the height texture UV map', update=changed)
 
@@ -47,6 +48,7 @@ class VLRShaderNodeParallax(bpy.types.ShaderNodeCustomGroup):
         layout.prop(self, 'depth'); layout.prop(self, 'midlevel'); layout.prop(self, 'steps')
         layout.prop(self, 'self_shadow')
         if self.self_shadow: layout.prop(self, 'shadow_steps')
+        layout.prop(self, 'self_ao')
         obj = context.object
         if obj is not None and obj.type == 'MESH':
             layout.prop_search(self, 'uv_map', obj.data, 'uv_layers')
@@ -102,7 +104,7 @@ def compile_height(t, node):
     body = re.sub(r'vec4 n_\w+ = texture\((uTx_\d+), ([^;]+)\);', sample, body)
     function = ('\n'.join(gradients) + '\nfloat vlrHeight(vec2 vlrUV, bool setup) {\n' + body
                 + '\nreturn clamp(' + height + ', 0.0, 1.0);\n}\n')
-    for prop in ('depth', 'midlevel', 'steps', 'self_shadow', 'shadow_steps'):
+    for prop in ('depth', 'midlevel', 'steps', 'self_shadow', 'shadow_steps', 'self_ao'):
         name = 'uParallax_' + prop
         from .node_transpiler import Param
         t.params.append(Param(name, 'float', node.name, 'property', prop))
@@ -118,6 +120,42 @@ vec3 vlrReliefNormal;
 vec3 vlrReliefU, vlrReliefV, vlrReliefN;
 vec2 vlrReliefHit;
 float vlrReliefDepth = 0.0;
+uniform vec4 uReliefAO; // strength, world radius, world bias, sample budget
+uniform float uReliefAORidge;
+// Eight world-space horizon directions, with a fixed physical reach at every quality.
+// Unlike screen AO this sees the virtual height field, including off-screen texels.
+float vlrReliefAOFactor() {
+    if (uParallax_self_ao < 0.5 || vlrReliefDepth <= 0.0 ||
+        (uReliefAO.x <= 0.0 && uReliefAORidge <= 0.0)) return 1.0;
+    vec3 N = vlrReliefN;
+    vec3 axis = abs(N.z) < 0.9 ? vec3(0,0,1) : vec3(0,1,0);
+    vec3 T = normalize(cross(axis,N)), B = cross(N,T);
+    float radius = max(uReliefAO.y, 0.00001);
+    float height = vlrHeight(vlrReliefHit, false);
+    int steps = int(clamp(uReliefAO.w / 8.0, 2.0, 8.0));
+    float occ = 0.0, ridge = 0.0;
+    for (int d=0; d<8; ++d) {
+        float angle = float(d) * 0.785398163;
+        vec3 D = cos(angle)*T + sin(angle)*B;
+        vec2 duv = vec2(dot(D,vlrReliefU),dot(D,vlrReliefV));
+        float horizon = 0.0, exposed = 0.0;
+        // Subtract the local tangent: a uniformly tilted height plane is not a crevice.
+        float tangent = -dot(vlrReliefNormal,D) / max(dot(vlrReliefNormal,N),0.05);
+        for (int i=1; i<=8; ++i) {
+            if (i>steps) break;
+            float t = float(i) / float(steps);
+            float r = radius * t*t;
+            float dz = (vlrHeight(vlrReliefHit + duv*r, false)-height)*vlrReliefDepth;
+            float above = max(dz - tangent*r - uReliefAO.z, 0.0);
+            float below = max(tangent*r - dz - uReliefAO.z, 0.0);
+            float falloff = 1.0 - 0.5*t*t;
+            horizon = max(horizon, above*above / (r*r + above*above) * falloff);
+            exposed = max(exposed, below*below / (r*r + below*below) * falloff);
+        }
+        occ += horizon; ridge += exposed;
+    }
+    return clamp(1.0 - occ*uReliefAO.x/8.0,0.0,1.0) * (1.0 + ridge*uReliefAORidge/8.0);
+}
 // Direction-independent height-field visibility; only sunlight consumes it for now.
 float vlrReliefVisibility(vec3 L) {
     if (uParallax_self_shadow < 0.5 || vlrReliefDepth <= 0.0) return 1.0;

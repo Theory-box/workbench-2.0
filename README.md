@@ -6,7 +6,7 @@ Experimental Blender renderer with live material-node previews, shadows, and scr
 
 ## Status
 
-Published version: **0.19.3 beta**. This branch is **0.19.6 parallax sun-shadow beta**, not a release. Development and primary tests use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum.
+Published version: **0.19.3 beta**. This branch is **0.19.7 parallax AO beta**, not a release. Development and primary tests use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum.
 
 ## General UV Blur node (0.19.5 development beta)
 
@@ -61,6 +61,16 @@ Only the connected, unmuted node on the active Material Output enables the effec
   This adds hard local shadows to sunlight only; ambient/key lighting is unchanged.
   It works independently of the scene shadow-map toggle. Complex height graphs cost
   more per sample; disable this option or reduce quality to regain performance.
+- **Height AO** includes the virtual height field in **Cavity World** (scene AO).
+  Enable Cavity World to see it; its Distance, Bias, Valley, Ridge and Quality
+  controls also govern this local effect. Object AO exclusions are respected.
+  The local horizon approximation uses 16–64 extra height samples per shaded pixel;
+  complex procedural height graphs can be costly. Disable Height AO to retain only
+  ordinary scene AO. Like existing scene AO, it modulates final surface color,
+  including baked lighting; it is not a directional sky-light visibility solution.
+- **Cavity Screen** already reads parallax relief normals. Use its existing Ridge
+  and Valley controls; no second cavity filter is added. It remains screen-space
+  and therefore depends on pixel resolution and viewing distance.
 - **UV Map** selects the affected map. Blank uses each mesh's render-active map.
   Use that same map for the height and surface textures; Mapping/Vector Math scaling
   remains part of those texture graphs. Implicit and named references to the same
@@ -73,7 +83,10 @@ Depth and quality edits use uniforms; they do not recompile the shader.
 
 This is apparent surface relief, not mesh displacement: silhouettes and shadows cast onto other objects
 remain unchanged. Height-field self-shadowing cannot cross mesh/UV discontinuities
-reliably; low sample counts can miss narrow features, and softness is not implemented. Extreme grazing angles fade
+reliably; low sample counts can miss narrow features, and sun-shadow softness is not implemented.
+Local AO assumes a continuous height field and cannot account for nearby separate
+objects (ordinary scene AO still handles those). Its tangent-corrected horizon
+estimate is approximate, especially on steep relief and UV seams. Extreme grazing angles fade
 out to avoid unbounded offsets. Use UV-based height graphs; Generated/Object/triplanar
 height coordinates are not supported by this first version. The custom node must be
 at material level (a reroute to the output is supported); nesting it inside a group

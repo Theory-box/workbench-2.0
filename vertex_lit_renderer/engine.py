@@ -2220,6 +2220,15 @@ class VertexLitEngine(bpy.types.RenderEngine):
                 if prog.get('parallax_uv_matches'):
                     from . import parallax
                     parallax.bind_uvs(sh, prog, depsgraph, oname)
+                if prog.get('parallax_uv_map') is not None:
+                    obj = bpy.data.objects.get(oname)
+                    enabled = bool(vls and vls.use_ao and not getattr(obj, 'vlr_ao_exclude', False))
+                    try:
+                        sh.uniform_float('uReliefAO', (vls.ao_strength if enabled else 0.0,
+                            vls.ao_radius if vls else 0.5, vls.ao_bias if vls else 0.02,
+                            float(vls.ao_samples) if vls else 16.0))
+                        sh.uniform_float('uReliefAORidge', vls.ao_ridge if enabled else 0.0)
+                    except ValueError: pass
                 if baked is not None:
                     sh.uniform_sampler('uLightmap', baked_texture)
                 if chunks is None:
@@ -2269,7 +2278,13 @@ class VertexLitEngine(bpy.types.RenderEngine):
                 is_transp = _material_transparent(mat)
                 frame_transp[mat_name] = is_transp
             mapped = [lightmap_render.object_for_record(self, rec) for rec in records] if self._lightmap_objects else None
-            if len(records) >= 4 and not is_transp and not (prog and prog.get("uv_maps")) and (mapped is None or not any(mapped)):
+            # A per-draw uniform cannot represent differing instance AO exclusions.
+            relief_excluded = (prog and prog.get("parallax_uv_map") is not None
+                               and vls and vls.use_ao and any(
+                                   getattr(bpy.data.objects.get(rec[1]), "vlr_ao_exclude", False)
+                                   for rec in records))
+            if (len(records) >= 4 and not is_transp and not (prog and prog.get("uv_maps"))
+                    and not relief_excluded and (mapped is None or not any(mapped))):
                 base = prog['shader'] if prog is not None else legacy
                 frag = prog['frag'] if prog is not None else (WORKBENCH_FRAG if mode == 'WORKBENCH' else PHONG_FRAG)
                 ish = instancing.shader_for(base, PHONG_VERT, frag)
@@ -2556,7 +2571,8 @@ class VertexLitEngine(bpy.types.RenderEngine):
                            and all(abs(a - b) < 1e-7 for ra, rb in zip(view_proj, self._prev_view_proj)
                                    for a, b in zip(ra, rb))),
             'texel': (1.0/max(rw, 1), 1.0/max(rh, 1)),
-            'clear_color': (wc[0], wc[1], wc[2], 1.0) if wc else (0.08, 0.08, 0.08, 1.0),
+            'clear_color': ((0.0, 0.0, 0.0, 0.0) if getattr(self, '_film_transparent', False)
+                            else ((wc[0], wc[1], wc[2], 1.0) if wc else (0.08, 0.08, 0.08, 1.0))),
             'draw_ao_occluders': ao_occluders,
             'draw_object_ids': ids_cb,
             'draw_view_normals': normals_cb,

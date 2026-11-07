@@ -1,0 +1,50 @@
+import bpy,sys,pathlib,json,traceback,numpy as np,gpu,importlib.util
+repo=pathlib.Path(__file__).resolve().parents[2];sys.path.insert(0,str(repo))
+spec=importlib.util.spec_from_file_location('sun_fixture',pathlib.Path(__file__).with_name('test_parallax_ao.py'));f=importlib.util.module_from_spec(spec);spec.loader.exec_module(f)
+from vertex_lit_renderer import engine,material_shader
+original=engine.VertexLitEngine.view_draw
+stage=0;frames=0;pending=False;done=False;captures=[]
+def finish(error=None):
+ global done
+ if done:return
+ done=True;(f.f.f.out/'ao_viewport.json').write_text(json.dumps({'pass':error is None,'error':error}));bpy.ops.wm.quit_blender()
+def change():
+ global stage,frames,pending
+ stage+=1;frames=0;pending=False
+ s=bpy.context.scene.vertex_lit
+ if stage==1:n.self_ao=True
+ if stage==2:s.ao_radius=.12
+ if stage==3:s.use_ao=False
+ if stage==4:s.use_cavity=True
+ if stage==5:s.cavity_ridge=0;s.cavity_valley=0
+ if stage==6:s.use_cavity=False;s.use_ao=True
+def draw(self,context,dg):
+ global frames,pending
+ try:
+  original(self,context,dg)
+  if done or pending or self._geo_pending or self._mat_pending:return
+  frames+=1
+  if frames<3:return
+  p=material_shader.get_program(m);assert not p['failed'],p['error']
+  w,h=context.region.width,context.region.height;b=gpu.state.active_framebuffer_get().read_color(0,0,w,h,4,0,'FLOAT');b.dimensions=w*h*4
+  px=np.asarray(b).reshape(h,w,4).copy();assert np.isfinite(px).all()
+  if captures:assert np.count_nonzero(np.max(abs(px-captures[-1]),axis=2)>.01)>100
+  captures.append(px);pending=True
+  if stage<6:bpy.app.timers.register(change,first_interval=.1)
+  else:bpy.app.timers.register(lambda:finish(),first_interval=.1)
+ except Exception:
+  error=traceback.format_exc();bpy.app.timers.register(lambda:finish(error),first_interval=.1)
+engine.VertexLitEngine.view_draw=draw
+def begin():
+ global ob,m,n
+ ob,m,n=f.setup();n.self_ao=False
+ for a in bpy.context.screen.areas:
+  if a.type=='VIEW_3D':
+   a.spaces.active.region_3d.view_perspective='CAMERA';a.spaces.active.overlay.show_overlays=False;a.spaces.active.shading.type='RENDERED'
+ bpy.app.timers.register(pump,first_interval=.15)
+def pump():
+ if done:return
+ for a in bpy.context.screen.areas:a.tag_redraw()
+ return .15
+bpy.app.timers.register(begin,first_interval=.5)
+bpy.app.timers.register(lambda:finish('timeout') if not done else None,first_interval=45)
