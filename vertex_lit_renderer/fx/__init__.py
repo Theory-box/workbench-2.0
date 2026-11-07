@@ -12,11 +12,12 @@ from .ssao import SSAO
 from .cavity import Cavity
 from .outline import Outline
 from .fxaa import FXAA
+from .contact import ContactShadows
 
 
 def default_effects():
     # order matters: AO + cavity shade the colour, outline draws lines, FXAA smooths last.
-    return [SSAO(), Cavity(), Outline(), FXAA()]
+    return [ContactShadows(), SSAO(), Cavity(), Outline(), FXAA()]
 
 
 def make_pipeline():

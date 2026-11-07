@@ -13,6 +13,8 @@ class GBuffer:
         self.w = 0
         self.h = 0
         self.aux = False
+        self.contact = False
+        self.sun = None
         self.color = None
         self.depth = None
         self.normal = None      # view normals, written by the main pass (aux mode)
@@ -20,17 +22,19 @@ class GBuffer:
         self.fb = None
         self.normal_fb = None   # normal target alone (for the splat normal pass)
 
-    def ensure(self, w, h, aux=False):
+    def ensure(self, w, h, aux=False, contact=False):
         w = max(int(w), 1); h = max(int(h), 1)
-        if self.fb is not None and w == self.w and h == self.h and aux == self.aux:
+        if self.fb is not None and w == self.w and h == self.h and aux == self.aux and contact == self.contact:
             return
         self.w, self.h, self.aux = w, h, aux
+        self.contact = contact
+        self.sun = gpu.types.GPUTexture((w, h), format="RGBA16F") if contact else None
         self.color = gpu.types.GPUTexture((w, h), format='RGBA16F')
         self.depth = gpu.types.GPUTexture((w, h), format='DEPTH_COMPONENT32F')
         if aux:
             self.normal = gpu.types.GPUTexture((w, h), format='RGBA16F')
             self.id = gpu.types.GPUTexture((w, h), format='RGBA8')
-            self.fb = gpu.types.GPUFrameBuffer(color_slots=(self.color, self.normal, self.id),
+            self.fb = gpu.types.GPUFrameBuffer(color_slots=((self.color, self.normal, self.id, self.sun) if contact else (self.color, self.normal, self.id)),
                                                depth_slot=self.depth)
             self.normal_fb = gpu.types.GPUFrameBuffer(color_slots=(self.normal,), depth_slot=self.depth)
         else:
@@ -39,6 +43,7 @@ class GBuffer:
 
     def free(self):
         self.color = None
+        self.sun = None
         self.depth = None
         self.normal = self.id = self.normal_fb = None
         self.fb = None

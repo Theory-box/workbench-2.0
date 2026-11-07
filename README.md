@@ -13,6 +13,25 @@ UV graph Blur caches, extended-UV alignment fixes, shared full-resolution caches
 for periodic textures, and live Color Ramp position/color edits. Screen-space
 contact shadows are not included.
 
+### Unreleased branch: 0.19.11 contact-shadow test build
+
+Render Properties > Workbench 2.0 > Lighting > Sun > **Contact Shadows** adds
+short-distance screen-space shadows to the live sun. It is off by default.
+Trace Distance and Thickness use scene world units; Steps controls sampling
+quality (8–64). Keep distances short and reduce Thickness if unrelated surfaces
+produce false shadows. Existing sun shadow maps remain responsible for general
+coverage and off-screen occluders.
+
+The effect runs in the viewport and F12, reuses the scene depth buffer, and stores
+the sun contribution separately during the existing draw. It does not redraw the
+scene or use temporal history. Extra full-resolution targets consume GPU memory;
+heavy-scene performance has not been measured. Ambient/key lighting and baked
+lightmaps are not darkened by this effect. Partial-alpha surfaces are skipped;
+hidden geometry and parallax height are not present in the scene depth. The effect
+is bypassed in scenes with active splat clouds until their compositors support
+separate sun output. Long traces, thin geometry, and screen boundaries remain
+limitations. This work is not in main or the published 0.19.10 release.
+
 Color Ramp stop positions and RGBA colors update as live uniforms, including in
 parallax height graphs and Blur sources. Adding/removing stops or changing the
 interpolation mode still recompiles the shader. A ramp edit upstream of Blur still

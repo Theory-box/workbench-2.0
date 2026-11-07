@@ -41,13 +41,15 @@ uniform float     uShadowTexelWorld;  /* world size of one shadow texel (for nor
 """
 
 LIGHT_FUNCS = """
+vec3 vlrSunLight = vec3(0.0);
 float vlr_shadow(vec3 wPos, vec3 N);   /* forward decl: vlr_light shadows the sun with it */
 vec3 vlr_light(vec3 wPos, vec3 N) {
     float hemi = dot(N, vec3(0.0, 0.0, 1.0)) * 0.5 + 0.5;
     vec3 light = mix(uGroundColor, uSkyColor, hemi) * uHemiIntensity;
     /* directional sun (no object): shadowed by the sun's shadow map, so ambient/hemisphere
        still fills the shadow. One dot product + a PCF lookup -> free on dense geo. */
-    light += uSunColor * (max(dot(N, normalize(uSunDir)), 0.0) * uSunIntensity) * vlr_shadow(wPos, N);
+    vlrSunLight = uSunColor * (max(dot(N, normalize(uSunDir)), 0.0) * uSunIntensity) * vlr_shadow(wPos, N);
+    light += vlrSunLight;
     /* camera key light (headlamp) — follows the view, added on top of the hemisphere */
     light += uKeyCol * (max(dot(N, normalize(uKeyDir)), 0.0) * uKeyIntensity);
     for (int i = 0; i < 8; i++) {
@@ -123,6 +125,8 @@ out vec3 vObjPos;      /* object-space position (Tex Coord: Object) */
 AUX_CHUNK = """
 layout(location = 1) out vec4 outNormalG;
 layout(location = 2) out vec4 outIdG;
+layout(location = 3) out vec4 outSunG;
+vec3 vlrSunOutput = vec3(0.0);
 uniform mat3 uViewMat3;
 uniform vec3 uObjId;
 uniform float uAuxA;
@@ -130,6 +134,7 @@ void vlr_write_aux(vec3 N){
     /* exactly what the old NORMAL pass wrote: view normal, no camera-facing flip */
     outNormalG = vec4(normalize(uViewMat3 * N) * 0.5 + 0.5, uAuxA);
     outIdG = vec4(uObjId, uAuxA);
+    outSunG = vec4(vlrSunOutput, 1.0);
 }
 """
 
@@ -167,7 +172,9 @@ void main() {
     vec3 lit   = clamp(light, 0.0, 12.0) * vColor.rgb;
     vec4 albedo = (uHasTexture != 0) ? texture(uAlbedo, vUV) : vec4(1.0);
     outColor = vec4(lit * albedo.rgb, vColor.a * albedo.a);
+    vlrSunOutput = (clamp(light, 0.0, 12.0) - clamp(light - vlrSunLight, 0.0, 12.0)) * vColor.rgb * albedo.rgb;
     vlr_write_aux(N);
+    outSunG.a = outColor.a;
 }
 """
 
@@ -193,6 +200,7 @@ void main(){
     vec4 albedo = (uHasTexture != 0) ? texture(uAlbedo, vUV) : vec4(1.0);
     outColor = vec4(lit * albedo.rgb * vColor.rgb, albedo.a * vColor.a);
     vlr_write_aux(N);
+    outSunG.a = outColor.a;
 }
 """
 
@@ -219,7 +227,9 @@ MAT_FRAG_MAIN_PIXEL = (
     "    vec3 lit   = clamp(light, 0.0, 12.0);\n"
     "    vec4 base  = computeBaseColor(vUV);\n"
     "    outColor = vec4(lit * base.rgb, base.a);\n"
+    "    vlrSunOutput = (clamp(light, 0.0, 12.0) - clamp(light - vlrSunLight, 0.0, 12.0)) * base.rgb;\n"
     "    vlr_write_aux(N);\n"
+    "    outSunG.a = outColor.a;\n"
     "}\n"
 )
 
@@ -290,8 +300,11 @@ VIEWMODE_FRAG = ("in vec2 vUV;\nin vec4 vColor;\nin vec3 vWpos;\nin vec3 vNrm;\n
                  "    if(uViewMode == 1) albedo = uSolidColor;\n"
                  "    else if(uViewMode == 2) albedo = uObjColor;\n"
                  "    else albedo = vColor.rgb;\n"
-                 "    vec3 light = clamp(vlr_light(vWpos, N), 0.0, 12.0);\n"
+                 "    vec3 rawLight = vlr_light(vWpos, N);\n"
+                 "    vec3 light = clamp(rawLight, 0.0, 12.0);\n"
                  "    outColor = vec4(light * albedo, 1.0);\n"
+                 "    vlrSunOutput = (light - clamp(rawLight - vlrSunLight, 0.0, 12.0)) * albedo;\n"
+                 "    vlr_write_aux(N);\n"
                  "}\n")
 
 
@@ -313,9 +326,12 @@ in vec2 vNdc;
 layout(location = 0) out vec4 fragColor;
 layout(location = 1) out vec4 outNormalG;
 layout(location = 2) out vec4 outIdG;
+layout(location = 3) out vec4 outSunG;
+vec3 vlrSunOutput = vec3(0.0);
 void main(){
     outNormalG = vec4(0.5, 0.5, 1.0, 1.0);    /* flat toward the camera: no curvature */
     outIdG = vec4(0.0, 0.0, 0.0, 1.0);        /* id 0 = background */
+    outSunG = vec4(0.0);
     if(uBgMode == 1){ fragColor = vec4(uBgColor, 1.0); return; }
     /* reconstruct the world-space view ray at this pixel and gradient by its up (world +Z) */
     vec4 wp = uInvViewProj * vec4(vNdc, 1.0, 1.0);

@@ -71,6 +71,7 @@ def prepare(engine, depsgraph, obj, prog, mode, drawable):
         frag = frag.replace('uKeyCol * ndl + vec3(uAmbient)', 'texture(uLightmap, vLightmapUV).rgb')
         # Lightmaps are linear HDR lighting, not restricted to the live-light cap.
         frag = frag.replace('clamp(light, 0.0, 12.0)', 'light')
+        frag = frag.replace('vlr_write_aux(N);', 'vlrSunOutput = vec3(0.0); vlr_write_aux(N);')
         shader = engine._lightmap_programs[fragment] = gpu.types.GPUShader(vertex, frag)
     engine._lightmap_programs_live.add(fragment)
     from .engine import _get_gpu_tex

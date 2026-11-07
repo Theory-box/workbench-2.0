@@ -16,6 +16,7 @@ uniform vec3 uViewer;
 layout(location=0) out vec4 fragColor;
 layout(location=1) out vec4 keepNormal;
 layout(location=2) out vec4 keepId;
+layout(location=3) out vec4 keepSun;
 '''
 _MAIN = '''
 void main(){
@@ -39,6 +40,8 @@ void main(){
  float f0=pow((properties.z-1.0)/(properties.z+1.0),2.0)*properties.w*2.0;
  float weight=mix(f0+(1.0-f0)*pow(1.0-cosine,5.0),1.0,properties.y);
  fragColor=vec4(reflected,clamp(weight,0.0,1.0));
+ // Suppress contact removal on the reflection overlay; it is already baked lighting.
+ keepSun=vec4(0.0,0.0,0.0,fragColor.a);
 }
 '''
 

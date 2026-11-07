@@ -66,7 +66,7 @@ class Pipeline:
         ss = {'1': 1.0, '1.5': 1.5, '2': 2.0}.get(getattr(vls, 'supersampling', '1'), 1.0)
         sw, sh = max(int(w * ss), 1), max(int(h * ss), 1)
         want_aux = bool(ctx.get('want_aux'))
-        self.gbuf.ensure(sw, sh, aux=want_aux)
+        self.gbuf.ensure(sw, sh, aux=want_aux, contact=bool(ctx.get("contact_enabled")))
         self.ping.ensure(sw, sh)
         ctx['texel'] = (1.0 / sw, 1.0 / sh)   # effects sample at the supersampled resolution
 
@@ -76,6 +76,8 @@ class Pipeline:
             gpu.state.depth_mask_set(True)
             self.gbuf.fb.clear(color=ctx.get('clear_color', (0.08, 0.08, 0.08, 1.0)), depth=1.0)
             draw_scene()
+
+        ctx['sun_tex'] = self.gbuf.sun
 
         # 1b) AO exclusion: render only the non-excluded occluders into a separate depth
         #     buffer; AO samples that so flagged objects don't cast (or receive) AO.
@@ -127,6 +129,8 @@ class Pipeline:
         idx = 0
         for e in self.effects:
             if not e.enabled(vls):
+                continue
+            if e.name == 'contact_shadows' and not ctx.get('contact_enabled'):
                 continue
             with self.ping.fb[idx].bind():
                 gpu.state.depth_test_set('NONE')

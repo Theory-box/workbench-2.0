@@ -59,6 +59,8 @@ def build_material_frag(mat, mode="PIXEL"):
         main = main.replace('\n', '\n' + base, 1)
         main = main.replace('normalize(vNrm)', 'vlrReliefNormal')
         main = main.replace('    vlr_write_aux(N);', '    outColor.rgb *= vlrReliefAOFactor();\n    vlr_write_aux(N);')
+    if 'vlrParallaxOffset' in res.glsl:
+        main = main.replace('    outColor.rgb *= vlrReliefAOFactor();', '    vlrSunOutput *= vlrReliefAOFactor();\n    outColor.rgb *= vlrReliefAOFactor();')
     for i, varying in enumerate(res.uv_maps.values()):
         vert = 'in vec2 namedUV%d;\nout vec2 %s;\n' % (i, varying) + vert
         vert = vert.replace('void main() {', 'void main() {\n    %s = namedUV%d;' % (varying, i))

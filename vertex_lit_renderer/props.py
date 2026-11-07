@@ -72,6 +72,12 @@ class VertexLitSettings(bpy.types.PropertyGroup):
     use_shadows: bpy.props.BoolProperty(
         name="Sun Shadows", default=False,
         description="Cast shadows from the sun (directional shadow map)")
+    use_contact_shadows: bpy.props.BoolProperty(name="Contact Shadows", default=False,
+        description="Short-range screen-space sun shadows; only visible opaque surfaces contribute")
+    contact_length: bpy.props.FloatProperty(name="Trace Distance", default=0.2, min=0.001, soft_max=2.0, max=100.0, subtype='DISTANCE')
+    contact_thickness: bpy.props.FloatProperty(name="Thickness", default=0.02, min=0.0001, soft_max=0.2, max=10.0, subtype='DISTANCE',
+        description="Depth tolerance: lower to reduce false shadows, higher to catch thin geometry")
+    contact_steps: bpy.props.IntProperty(name="Steps", default=24, min=8, max=64)
     shadow_resolution: bpy.props.EnumProperty(
         name="Shadow Res",
         items=[('1024', '1024', ''), ('2048', '2048', ''), ('4096', '4096', '')],

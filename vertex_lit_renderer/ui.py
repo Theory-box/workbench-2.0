@@ -87,6 +87,14 @@ class VERTEX_LIT_PT_settings(bpy.types.Panel):
                 if s.use_shadows and s.sun_intensity <= 0.0:
                     shadows.label(text="Sun intensity is 0 - no shadows", icon='INFO')
 
+            contact = section(sun, "VLR_contact_shadows", "Contact Shadows", default_closed=True,
+                              toggle_owner=s, toggle='use_contact_shadows')
+            if contact is not None:
+                contact.active = s.use_contact_shadows and s.sun_intensity > 0
+                contact.prop(s, 'contact_length')
+                contact.prop(s, 'contact_thickness')
+                contact.prop(s, 'contact_steps')
+
     # ── View Mode / Background ───────────────────────────────────────────────
     def draw_viewmode(self, context, s, root):
         body = section(root, "VLR_viewmode", "View Mode")

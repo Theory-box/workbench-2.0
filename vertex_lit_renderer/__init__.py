@@ -3,14 +3,14 @@
 bl_info = {
     "name":        "Workbench 2.0",
     "author":      "Theory-box / Claude",
-    "version":     (0, 19, 10),
+    "version":     (0, 19, 11),
     "blender":     (4, 2, 0),
     "location":    "Properties > Render > Render Engine → Workbench 2.0",
     "description": "Solid studio + live-node material renderer (+ screen-space AO) for retro game look-dev. "
                    "Lighting (diffuse + shadow + ambient) is computed per vertex "
                    "with per-pixel scene lighting, shadows, and live node materials. "
                    "Optional live material-node preview (transpiles the shader graph to GLSL).",
-    "warning":     "Early development beta: save work and test on project copies. Experimental. F12 render is viewport-quality.",
+    "warning":     "Unreleased contact-shadow test build. Early development beta; save work and test project copies.",
     "category":    "Render",
 }
 

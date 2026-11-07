@@ -2506,7 +2506,13 @@ class VertexLitEngine(bpy.types.RenderEngine):
         # The main pass writes the view-normal and object-id buffers as extra render targets
         # (see shaders.AUX_CHUNK), so neither needs its own full re-draw of the scene. Splats are
         # not part of that pass, so their normals are still drawn -- onto the same buffer.
-        want_aux = bool(vls and (getattr(vls, 'use_outline', False) or getattr(vls, 'use_cavity', False)))
+        from .fx.contact import enabled as contact_enabled
+        contact = contact_enabled(vls)
+        # Splat compositors do not yet publish a separate sun contribution.
+        # Avoid subtracting mesh sunlight from their overlaid colors.
+        from . import splat_render
+        contact = contact and not (splat_render.SCENE_CLOUDS or getattr(self, '_splat_anchors', []))
+        want_aux = bool(contact or (vls and (getattr(vls, 'use_outline', False) or getattr(vls, 'use_cavity', False))))
         self._aux_active = want_aux
 
         ids_cb = None
@@ -2587,6 +2593,11 @@ class VertexLitEngine(bpy.types.RenderEngine):
             'draw_view_normals': normals_cb,
             'draw_splat_normals': splat_normals_cb,
             'want_aux': want_aux,
+            'contact_enabled': contact,
+            'contact_length': getattr(vls, 'contact_length', 0.2),
+            'contact_thickness': getattr(vls, 'contact_thickness', 0.02),
+            'contact_steps': getattr(vls, 'contact_steps', 24),
+            'contact_sun_dir': tuple(view_mat3 @ Vector(self._sun[0])),
             'ao_radius':   (vls.ao_radius   if vls else 0.5),
             'ao_strength': (vls.ao_strength if vls else 1.0),
             'ao_bias':     (vls.ao_bias     if vls else 0.02),
