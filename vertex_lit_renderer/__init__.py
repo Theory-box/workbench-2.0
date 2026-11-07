@@ -10,7 +10,7 @@ bl_info = {
                    "Lighting (diffuse + shadow + ambient) is computed per vertex "
                    "with per-pixel scene lighting, shadows, and live node materials. "
                    "Optional live material-node preview (transpiles the shader graph to GLSL).",
-    "warning":     "Blur/parallax branch beta: early development. Experimental. F12 render is viewport-quality. Default: Solid studio shading",
+    "warning":     "Early development beta: save work and test on project copies. Experimental. F12 render is viewport-quality.",
     "category":    "Render",
 }
 
