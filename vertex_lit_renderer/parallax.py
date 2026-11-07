@@ -27,6 +27,8 @@ class VLRShaderNodeParallax(bpy.types.ShaderNodeCustomGroup):
     steps: IntProperty(name='Quality', default=32, min=8, max=128,
                        description='Maximum ray steps; higher values cost more GPU time', update=changed)
     self_shadow: BoolProperty(name='Sun Self-Shadow', default=True, update=changed)
+    depth_intersections: BoolProperty(name='Depth Intersections', default=True,
+        description='Write the visible relief depth so it intersects other objects and screen-space effects; mesh silhouettes stay flat', update=changed)
     self_ao: BoolProperty(name='Height AO', default=True, description='Include height relief in Cavity World AO; uses the scene AO controls', update=changed)
     shadow_steps: IntProperty(name='Shadow Quality', default=24, min=8, max=128, update=changed)
     shadow_height: FloatProperty(name='Shadow Height', default=1.0, min=0.0, max=20.0, soft_max=4.0,
@@ -48,6 +50,7 @@ class VLRShaderNodeParallax(bpy.types.ShaderNodeCustomGroup):
 
     def draw_buttons(self, context, layout):
         layout.prop(self, 'depth'); layout.prop(self, 'midlevel'); layout.prop(self, 'steps')
+        layout.prop(self, 'depth_intersections')
         layout.prop(self, 'self_shadow')
         if self.self_shadow:
             layout.prop(self, 'shadow_height')
@@ -108,7 +111,7 @@ def compile_height(t, node):
     body = re.sub(r'vec4 n_\w+ = texture\((uTx_\d+), ([^;]+)\);', sample, body)
     function = ('\n'.join(gradients) + '\nfloat vlrHeight(vec2 vlrUV, bool setup) {\n' + body
                 + '\nreturn clamp(' + height + ', 0.0, 1.0);\n}\n')
-    for prop in ('depth', 'midlevel', 'steps', 'self_shadow', 'shadow_steps', 'shadow_height', 'self_ao'):
+    for prop in ('depth', 'midlevel', 'steps', 'depth_intersections', 'self_shadow', 'shadow_steps', 'shadow_height', 'self_ao'):
         name = 'uParallax_' + prop
         from .node_transpiler import Param
         t.params.append(Param(name, 'float', node.name, 'property', prop))
@@ -124,6 +127,7 @@ vec3 vlrReliefNormal;
 vec3 vlrReliefU, vlrReliefV, vlrReliefN;
 vec2 vlrReliefHit;
 float vlrReliefDepth = 0.0;
+float vlrReliefPixelDepth;
 uniform vec4 uReliefAO; // strength, world radius, world bias, sample budget
 uniform float uReliefAORidge;
 // Eight world-space horizon directions, with a fixed physical reach at every quality.
@@ -178,13 +182,20 @@ float vlrReliefVisibility(vec3 L) {
     }
     return 1.0;
 }
-vec2 vlrFinishRelief(vec2 uv, vec2 offset, vec3 px, vec3 py, vec2 ux, vec2 uy, vec3 N, float det, float fade) {
+vec2 vlrFinishRelief(vec2 uv, vec2 offset, vec3 px, vec3 py, vec2 ux, vec2 uy, vec3 N, float det, float fade, vec3 V, float layer) {
     vec2 hit = uv + offset;
     vlrReliefHit = hit;
     vlrReliefN = N;
     vlrReliefU = (ux.x*cross(py,N) + uy.x*cross(N,px))/det;
     vlrReliefV = (ux.y*cross(py,N) + uy.y*cross(N,px))/det;
     vlrReliefDepth = uParallax_depth * fade;
+    if (uParallax_depth_intersections > 0.5 && vlrReliefDepth > 0.0) {
+        // Use the same ray/layer as the UV hit, including perspective and grazing fade.
+        vec3 hitWorld = vWpos + V * (vlrReliefDepth * (layer-uParallax_midlevel) / max(dot(N,V),0.03));
+        vec4 hitClip = uViewProj * vec4(hitWorld,1.0);
+        if (hitClip.w <= 0.0 || abs(hitClip.z) > hitClip.w) discard;
+        vlrReliefPixelDepth = hitClip.z / hitClip.w * 0.5 + 0.5;
+    }
     float hx = vlrHeight(hit + ux * 0.5, false) - vlrHeight(hit - ux * 0.5, false);
     float hy = vlrHeight(hit + uy * 0.5, false) - vlrHeight(hit - uy * 0.5, false);
     vec3 gradient = (cross(py,N)*hx + cross(N,px)*hy) / det;
@@ -193,6 +204,7 @@ vec2 vlrFinishRelief(vec2 uv, vec2 offset, vec3 px, vec3 py, vec2 ux, vec2 uy, v
 }
 vec2 vlrParallaxOffset(vec2 uv) {
     vlrReliefDepth = 0.0;
+    vlrReliefPixelDepth = gl_FragCoord.z;
     vlrReliefNormal = normalize(vNrm);
     float initialHeight = vlrHeight(uv, true);
     vec3 px = dFdx(vWpos), py = dFdy(vWpos);
@@ -217,7 +229,7 @@ vec2 vlrParallaxOffset(vec2 uv) {
     float layer = 1.0;
     vec2 offset = ray * (layer - uParallax_midlevel);
     float prev = layer - vlrHeight(uv + offset, false);
-    if (prev <= 0.0) return vlrFinishRelief(uv, offset, px, py, ux, uy, N, det, fade);
+    if (prev <= 0.0) return vlrFinishRelief(uv, offset, px, py, ux, uy, N, det, fade, V, layer);
     float upper = layer;
     for (int i=0; i<128; ++i) {
         if (i >= steps) break;
@@ -232,8 +244,9 @@ vec2 vlrParallaxOffset(vec2 uv) {
         if (middle > vlrHeight(uv + ray * (middle-uParallax_midlevel), false)) upper = middle;
         else layer = middle;
     }
-    offset = ray * ((upper + layer) * 0.5 - uParallax_midlevel);
-    return vlrFinishRelief(uv, offset, px, py, ux, uy, N, det, fade);
+    layer = (upper + layer) * 0.5;
+    offset = ray * (layer - uParallax_midlevel);
+    return vlrFinishRelief(uv, offset, px, py, ux, uy, N, det, fade, V, layer);
 }
 '''
 

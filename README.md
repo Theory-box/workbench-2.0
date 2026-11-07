@@ -8,11 +8,26 @@ Experimental Blender renderer with live material-node previews, shadows, and scr
 
 Published version: **0.19.11 beta**. Development and primary tests use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum; the new features have not been validated on 4.2.
 
-This branch is an unpublished **0.19.12** test build. The Parallax node now exposes
+This branch is an unpublished **0.19.13** test build. The Parallax node now exposes
 **Shadow Height** under Sun Self-Shadow: 1.0 preserves existing shadows, values
 above 1 exaggerate shadow height, and 0 disables height-field sun occlusion.
 It updates live without changing Depth, visible relief, normals, or height AO.
 Large multipliers may need higher Shadow Quality to avoid missing thin features.
+
+**Depth Intersections** (enabled by default) writes the parallax ray hit into the
+depth buffer. Raised relief can cover the base of intersecting objects; recessed
+relief can reveal them. This uses the existing Depth/Midlevel and updates live.
+Screen-space AO and contact shadows see this depth in the normal rendering path.
+Disable the toggle to restore flat mesh intersections. It does not expand mesh
+silhouettes, create geometry, or change the geometry-only sun shadow map. The
+separate AO-exclusion pass and baked planar reflection overlays still use mesh
+depth; disable Depth Intersections on those surfaces if they conflict. Transparent
+surfaces still do not write opaque occlusion depth. Shader depth writes can reduce
+early depth rejection efficiency; heavy-scene performance has not been benchmarked.
+
+Validated on Blender 4.4.3: native viewport live toggles, F12 cube/heightmap overlap,
+raised/recessed constant heights against actual geometry in perspective and ortho,
+screen-space AO/contact response, zero depth, and existing lightmap/shadow tests.
 
 This release includes material parallax, height-field sun self-shadowing and AO,
 UV graph Blur caches, extended-UV alignment fixes, shared full-resolution caches
