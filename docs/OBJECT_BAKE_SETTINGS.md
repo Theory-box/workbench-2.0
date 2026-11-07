@@ -10,10 +10,9 @@ configurations into bake calls. Images are assigned only after every group succe
 failure/cancellation preserves previous lightmap assignments. Modifiers on selected
 targets are disabled during the operation and restored afterward.
 
-Direct and Indirect select the corresponding Cycles diffuse bake passes; Color
-remains excluded. Direct + Indirect includes both. The renderer displays the chosen
-baked contribution as its lightmap; Indirect-only does not automatically add live
-direct lighting. Existing scene-wide settings are retained as legacy data but are
+Direct and Indirect select the corresponding Cycles diffuse bake passes; Color remains excluded. **Keep Live Lighting** is enabled by default per object: the lightmap is added to live Sun, Sky/Ground, and Key Light, preserving parallax self-shadowing. Use Indirect-only for baked bounce plus real-time direct light. Turn Keep Live Lighting off to replace live lighting with a complete bake; otherwise Direct/Both bakes may double direct illumination. This display toggle takes effect without rebaking. Screen AO/cavity retain their existing behavior.
+
+Existing scene-wide settings are retained as legacy data but are
 no longer used to choose object bake settings.
 
 Validated with mixed 128/256 images, different sample/pass settings in one selection,

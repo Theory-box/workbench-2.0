@@ -62,18 +62,26 @@ def prepare(engine, depsgraph, obj, prog, mode, drawable):
         geometry = engine._lightmap_geometry[geometry_key] = (batch, vbo)
     engine._lightmap_geometry_live.add(geometry_key)
     fragment = prog['frag'] if prog is not None else (shaders.WORKBENCH_FRAG if mode == 'WORKBENCH' else shaders.PHONG_FRAG)
-    shader = engine._lightmap_programs.get(fragment)
+    keep_live = obj.vlr_lightmap_settings.keep_live_lighting
+    program_key = (fragment, keep_live)
+    shader = engine._lightmap_programs.get(program_key)
     if shader is None:
         vertex = 'in vec2 lightmapUV;\nout vec2 vLightmapUV;\n' + (prog['vert'] if prog is not None else shaders.PHONG_VERT)
         vertex = vertex.replace('void main() {', 'void main() {\n    vLightmapUV = lightmapUV;')
         frag = 'uniform sampler2D uLightmap;\nin vec2 vLightmapUV;\n' + fragment
-        frag = frag.replace('vlr_light(vWpos, N)', 'texture(uLightmap, vLightmapUV).rgb')
-        frag = frag.replace('uKeyCol * ndl + vec3(uAmbient)', 'texture(uLightmap, vLightmapUV).rgb')
-        # Lightmaps are linear HDR lighting, not restricted to the live-light cap.
-        frag = frag.replace('clamp(light, 0.0, 12.0)', 'light')
-        frag = frag.replace('vlr_write_aux(N);', 'vlrSunOutput = vec3(0.0); vlr_write_aux(N);')
-        shader = engine._lightmap_programs[fragment] = gpu.types.GPUShader(vertex, frag)
-    engine._lightmap_programs_live.add(fragment)
+        if keep_live:
+            # Add irradiance after the live-light clamp. Preserve the separate sun
+            # output so contact shadows only remove sunlight, never baked bounce.
+            frag = frag.replace('outColor = vec4(lit *',
+                                'outColor = vec4((lit + texture(uLightmap, vLightmapUV).rgb) *')
+        else:
+            frag = frag.replace('vlr_light(vWpos, N)', 'texture(uLightmap, vLightmapUV).rgb')
+            frag = frag.replace('uKeyCol * ndl + vec3(uAmbient)', 'texture(uLightmap, vLightmapUV).rgb')
+            # Lightmaps are linear HDR lighting, not restricted to the live-light cap.
+            frag = frag.replace('clamp(light, 0.0, 12.0)', 'light')
+            frag = frag.replace('vlr_write_aux(N);', 'vlrSunOutput = vec3(0.0); vlr_write_aux(N);')
+        shader = engine._lightmap_programs[program_key] = gpu.types.GPUShader(vertex, frag)
+    engine._lightmap_programs_live.add(program_key)
     from .engine import _get_gpu_tex
     texture = _get_gpu_tex(state.image)
     if texture is None: return None

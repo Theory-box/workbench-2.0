@@ -4,6 +4,8 @@ import math
 
 
 class VLRLightmapSettings(bpy.types.PropertyGroup):
+    keep_live_lighting: bpy.props.BoolProperty(name='Keep Live Lighting', default=True,
+        description='Add the lightmap to live lighting, preserving Sun and parallax self-shadowing. Use Indirect-only baking to avoid doubling direct light')
     lighting_source: bpy.props.EnumProperty(name='Lighting', items=[
         ('WORKBENCH', 'Cycles — Workbench Lighting', 'Use Workbench Sun and Sky/Ground; ignore existing lights/world, retain emission'),
         ('SCENE', 'Cycles — Scene Lighting', 'Use the existing scene lights and world')], default='SCENE')
@@ -314,6 +316,9 @@ class VLR_PT_lightmap(bpy.types.Panel):
         layout.label(text='Settings: ' + ob.name)
         layout.prop(settings, 'lighting_source')
         layout.prop(settings, 'passes')
+        layout.prop(settings, 'keep_live_lighting')
+        if settings.keep_live_lighting and settings.passes != 'INDIRECT':
+            layout.label(text='Direct bake + live light may double lighting', icon='INFO')
         if settings.lighting_source == 'WORKBENCH':
             layout.label(text='Sun + Sky/Ground; emission retained')
             layout.label(text='Key Light excluded')
