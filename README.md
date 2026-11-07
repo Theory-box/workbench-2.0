@@ -6,7 +6,7 @@ Experimental Blender renderer with live material-node previews, shadows, and scr
 
 ## Status
 
-Published version: **0.19.3 beta**. This branch is **0.19.5 blur/parallax beta**, not a release. Development and primary tests use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum.
+Published version: **0.19.3 beta**. This branch is **0.19.6 parallax sun-shadow beta**, not a release. Development and primary tests use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum.
 
 ## General UV Blur node (0.19.5 development beta)
 
@@ -56,6 +56,11 @@ Only the connected, unmuted node on the active Material Output enables the effec
 - **Depth** is relief depth in world units. Start small (for example 0.01–0.05).
 - **Midlevel** is the original surface height: 0.5 centers relief; 1 recesses it.
 - **Quality** sets the maximum ray steps (8–128), followed by five refinement steps.
+- **Sun Self-Shadow** traces the height field toward the built-in sun (enabled by default).
+  **Shadow Quality** controls 8–128 samples, independently of view-ray quality.
+  This adds hard local shadows to sunlight only; ambient/key lighting is unchanged.
+  It works independently of the scene shadow-map toggle. Complex height graphs cost
+  more per sample; disable this option or reduce quality to regain performance.
 - **UV Map** selects the affected map. Blank uses each mesh's render-active map.
   Use that same map for the height and surface textures; Mapping/Vector Math scaling
   remains part of those texture graphs. Implicit and named references to the same
@@ -66,8 +71,9 @@ Color and alpha sampling on that map follows the intersection, in viewport and F
 Shared materials share the effect. Baked lightmap coordinates remain unchanged.
 Depth and quality edits use uniforms; they do not recompile the shader.
 
-This is apparent surface relief, not mesh displacement: silhouettes and cast shadows
-remain unchanged, and there is no relief self-shadowing. Extreme grazing angles fade
+This is apparent surface relief, not mesh displacement: silhouettes and shadows cast onto other objects
+remain unchanged. Height-field self-shadowing cannot cross mesh/UV discontinuities
+reliably; low sample counts can miss narrow features, and softness is not implemented. Extreme grazing angles fade
 out to avoid unbounded offsets. Use UV-based height graphs; Generated/Object/triplanar
 height coordinates are not supported by this first version. The custom node must be
 at material level (a reroute to the output is supported); nesting it inside a group

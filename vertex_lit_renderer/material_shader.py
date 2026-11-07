@@ -48,6 +48,10 @@ def build_material_frag(mat, mode="PIXEL"):
     if "vlrParallaxOffset" in res.glsl:
         if "in vec3 vWpos;" not in head:
             head += "in vec3 vWpos;\n"
+        if light:
+            light = 'float vlrReliefVisibility(vec3 L);\n' + light.replace(
+                '* vlr_shadow(wPos, N);',
+                '* vlr_shadow(wPos, N) * (uSunIntensity > 0.0 ? vlrReliefVisibility(normalize(uSunDir)) : 1.0);')
         # Resolve the visible height intersection before evaluating its lighting.
         lines = main.splitlines(True)
         base = next(line for line in lines if 'computeBaseColor(vUV)' in line)

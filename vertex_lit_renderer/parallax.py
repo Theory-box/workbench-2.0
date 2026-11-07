@@ -1,6 +1,6 @@
 """Explicit, material-local height relief. No geometry or lightmap UV mutation."""
 import bpy
-from bpy.props import FloatProperty, IntProperty, StringProperty
+from bpy.props import FloatProperty, IntProperty, StringProperty, BoolProperty
 
 NODE_ID = 'VLRShaderNodeParallax'
 
@@ -26,6 +26,8 @@ class VLRShaderNodeParallax(bpy.types.ShaderNodeCustomGroup):
     midlevel: FloatProperty(name='Midlevel', default=0.5, min=0.0, max=1.0, update=changed)
     steps: IntProperty(name='Quality', default=32, min=8, max=128,
                        description='Maximum ray steps; higher values cost more GPU time', update=changed)
+    self_shadow: BoolProperty(name='Sun Self-Shadow', default=True, update=changed)
+    shadow_steps: IntProperty(name='Shadow Quality', default=24, min=8, max=128, update=changed)
     uv_map: StringProperty(name='UV Map', description='Blank uses render-active UV; match the height texture UV map', update=changed)
 
     def init(self, context):
@@ -43,6 +45,8 @@ class VLRShaderNodeParallax(bpy.types.ShaderNodeCustomGroup):
 
     def draw_buttons(self, context, layout):
         layout.prop(self, 'depth'); layout.prop(self, 'midlevel'); layout.prop(self, 'steps')
+        layout.prop(self, 'self_shadow')
+        if self.self_shadow: layout.prop(self, 'shadow_steps')
         obj = context.object
         if obj is not None and obj.type == 'MESH':
             layout.prop_search(self, 'uv_map', obj.data, 'uv_layers')
@@ -98,7 +102,7 @@ def compile_height(t, node):
     body = re.sub(r'vec4 n_\w+ = texture\((uTx_\d+), ([^;]+)\);', sample, body)
     function = ('\n'.join(gradients) + '\nfloat vlrHeight(vec2 vlrUV, bool setup) {\n' + body
                 + '\nreturn clamp(' + height + ', 0.0, 1.0);\n}\n')
-    for prop in ('depth', 'midlevel', 'steps'):
+    for prop in ('depth', 'midlevel', 'steps', 'self_shadow', 'shadow_steps'):
         name = 'uParallax_' + prop
         from .node_transpiler import Param
         t.params.append(Param(name, 'float', node.name, 'property', prop))
@@ -111,8 +115,33 @@ def compile_height(t, node):
 TRACE = '''
 uniform mat4 uViewProj;
 vec3 vlrReliefNormal;
+vec3 vlrReliefU, vlrReliefV, vlrReliefN;
+vec2 vlrReliefHit;
+float vlrReliefDepth = 0.0;
+// Direction-independent height-field visibility; only sunlight consumes it for now.
+float vlrReliefVisibility(vec3 L) {
+    if (uParallax_self_shadow < 0.5 || vlrReliefDepth <= 0.0) return 1.0;
+    float facing = dot(L, vlrReliefN);
+    if (facing <= 0.001) return 0.0;
+    float h = vlrHeight(vlrReliefHit, false);
+    float travel = 1.0 - h;
+    if (travel < 0.0001) return 1.0;
+    vec2 slope = vec2(dot(L,vlrReliefU),dot(L,vlrReliefV)) * vlrReliefDepth / facing;
+    int count = int(clamp(uParallax_shadow_steps,8.0,128.0));
+    for (int i=1; i<=128; ++i) {
+        if (i>count) break;
+        float dz = travel * float(i) / float(count);
+        if (vlrHeight(vlrReliefHit + slope*dz, false) > h + dz + 0.002) return 0.0;
+    }
+    return 1.0;
+}
 vec2 vlrFinishRelief(vec2 uv, vec2 offset, vec3 px, vec3 py, vec2 ux, vec2 uy, vec3 N, float det, float fade) {
     vec2 hit = uv + offset;
+    vlrReliefHit = hit;
+    vlrReliefN = N;
+    vlrReliefU = (ux.x*cross(py,N) + uy.x*cross(N,px))/det;
+    vlrReliefV = (ux.y*cross(py,N) + uy.y*cross(N,px))/det;
+    vlrReliefDepth = uParallax_depth * fade;
     float hx = vlrHeight(hit + ux * 0.5, false) - vlrHeight(hit - ux * 0.5, false);
     float hy = vlrHeight(hit + uy * 0.5, false) - vlrHeight(hit - uy * 0.5, false);
     vec3 gradient = (cross(py,N)*hx + cross(N,px)*hy) / det;
@@ -120,6 +149,7 @@ vec2 vlrFinishRelief(vec2 uv, vec2 offset, vec3 px, vec3 py, vec2 ux, vec2 uy, v
     return offset;
 }
 vec2 vlrParallaxOffset(vec2 uv) {
+    vlrReliefDepth = 0.0;
     vlrReliefNormal = normalize(vNrm);
     float initialHeight = vlrHeight(uv, true);
     vec3 px = dFdx(vWpos), py = dFdy(vWpos);
