@@ -7,7 +7,7 @@ set parallax depth to zero for drawing. This also bypasses local height AO,
 parallax sun self-shadowing, and depth intersections. Original node values and the
 global Parallax toggle are preserved. Ordinary material edits are not a trigger.
 
-Relief returns about 0.2 seconds after the last interaction; a timer requests the
+Relief returns on the next stationary redraw, with no idle delay; a timer requests the
 restoring redraw. Both final stills and final animation renders keep full quality.
 Baked reflection capture is outside the temporary viewport bypass. This does not
 reduce geometry extraction or other screen-effect costs; no performance multiplier
