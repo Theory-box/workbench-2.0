@@ -4,6 +4,9 @@ import math
 
 
 class VLRLightmapSettings(bpy.types.PropertyGroup):
+    lighting_source: bpy.props.EnumProperty(name='Lighting', items=[
+        ('WORKBENCH', 'Cycles — Workbench Lighting', 'Use Workbench Sun and Sky/Ground; ignore existing lights/world, retain emission'),
+        ('SCENE', 'Cycles — Scene Lighting', 'Use the existing scene lights and world')], default='SCENE')
     resolution: bpy.props.EnumProperty(name='Resolution', items=[(str(n), str(n), '') for n in (128, 256, 512, 1024, 2048, 4096)], default='1024')
     samples: bpy.props.IntProperty(name='Samples', default=64, min=1, max=4096)
 
@@ -137,8 +140,11 @@ def bake_selected(context):
         bpy.ops.object.select_all(action='DESELECT')
         for ob in objects: ob.select_set(True)
         context.view_layer.objects.active = objects[0]
-        if _cycles_bake(uv_name, margin) != {'FINISHED'}:
-            raise RuntimeError('Cycles lightmap bake was cancelled')
+        from .bake_lighting import lighting_source
+        with lighting_source(scene, scene.vlr_lightmap_settings.lighting_source):
+            context.view_layer.update()
+            if _cycles_bake(uv_name, margin) != {'FINISHED'}:
+                raise RuntimeError('Cycles lightmap bake was cancelled')
         for record in staged:
             record['image'].pack()
         for record in staged:
@@ -262,6 +268,10 @@ class VLR_PT_lightmap(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         settings = context.scene.vlr_lightmap_settings
+        layout.prop(settings, 'lighting_source')
+        if settings.lighting_source == 'WORKBENCH':
+            layout.label(text='Sun + Sky/Ground; emission retained')
+            layout.label(text='Key Light excluded')
         layout.prop(settings, 'resolution'); layout.prop(settings, 'samples')
         layout.operator('vertex_lit.lightmap_bake')
         layout.operator('vertex_lit.lightmap_clear')
