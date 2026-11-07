@@ -6,7 +6,12 @@ Experimental Blender renderer with live material-node previews, shadows, and scr
 
 ## Status
 
-Published version: **0.19.3 beta**. This branch is **0.19.9 blur cache regression fix beta**, not a release. Development and primary tests use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum.
+Published version: **0.19.3 beta**. This branch is **0.19.10 live-ramp beta**, not a release. Development and primary tests use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum.
+
+Color Ramp stop positions and RGBA colors update as live uniforms, including in
+parallax height graphs and Blur sources. Adding/removing stops or changing the
+interpolation mode still recompiles the shader. A ramp edit upstream of Blur still
+refreshes the cached image, but reuses its source shader.
 
 ## General UV Blur node (0.19.5 development beta)
 

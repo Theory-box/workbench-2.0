@@ -82,6 +82,10 @@ class Param:
         if node is None:
             return 0.0
         try:
+            if self.kind == "ramp_color":
+                return node.color_ramp.elements[self.index].color
+            if self.kind == "ramp_position":
+                return node.color_ramp.elements[self.index].position
             if self.kind == "property":
                 return getattr(node, self.index)
             if self.kind == "input":
@@ -735,32 +739,30 @@ class _Transpiler:
         z = self.input_expr(node, node.inputs.get("Z"), "float")
         return "vec4({x},{y},{z},1.0)".format(x=x, y=y, z=z)
 
-    # ---- Color Ramp (values baked; recompiles on ramp edit — noted) ----
+    # ---- Color Ramp: live positions/colors; stop count and mode are structural ----
     def _n_valtorgb(self, node, out):
         fac = self.input_expr(node, node.inputs.get("Fac"), "float")
         ramp = node.color_ramp
-        els = list(ramp.elements)
         var = self._new_var("ramp")
         self._line("float {v}_t = clamp({f}, 0.0, 1.0);".format(v=var, f=fac))
-        if not els:
-            self._line("vec4 {v} = vec4(0.0,0.0,0.0,1.0);".format(v=var))
-            return 'float({}.a)'.format(var) if out.name == 'Alpha' else var
-        # start with first stop colour, then blend toward each subsequent stop
-        c0 = els[0].color
-        self._line("vec4 {v} = vec4({r},{g},{b},{a});".format(
-            v=var, r=_f(c0[0]), g=_f(c0[1]), b=_f(c0[2]), a=_f(c0[3])))
+        def param(kind, index, want):
+            name = "uP_{}".format(len(self.params) + 1)
+            self.params.append(Param(name, want, node.name, kind, index, self._cur_tree()))
+            self.param_decls.append("uniform {} {};".format(_GLTYPE[want], name))
+            self._param_type[name] = want
+            return name
+        positions = [param("ramp_position", i, "float") for i in range(len(ramp.elements))]
+        colors = [param("ramp_color", i, "vec4") for i in range(len(ramp.elements))]
+        self._line("vec4 {} = {};".format(var, colors[0] if colors else "vec4(0.0)"))
         interp = getattr(ramp, "interpolation", "LINEAR")
-        for i in range(1, len(els)):
-            p0 = els[i - 1].position; p1 = els[i].position; c1 = els[i].color
-            denom = max(p1 - p0, 1e-6)
+        for i in range(1, len(positions)):
+            p0, p1 = positions[i-1], positions[i]
             if interp == "CONSTANT":
-                w = "step({p1}, {v}_t)".format(p1=_f(p1), v=var)
+                w = "step({}, {}_t)".format(p1, var)
             else:
-                w = "clamp(({v}_t-{p0})/{d}, 0.0, 1.0)".format(v=var, p0=_f(p0), d=_f(denom))
-                if interp == "EASE":
-                    w = "smoothstep(0.0,1.0,{})".format(w)
-            self._line("{v} = mix({v}, vec4({r},{g},{b},{a}), {w});".format(
-                v=var, r=_f(c1[0]), g=_f(c1[1]), b=_f(c1[2]), a=_f(c1[3]), w=w))
+                w = "clamp(({v}_t-{p0})/max({p1}-{p0},1e-6),0.0,1.0)".format(v=var,p0=p0,p1=p1)
+                if interp == "EASE": w = "smoothstep(0.0,1.0,{})".format(w)
+            self._line("{v} = mix({v}, {c}, {w});".format(v=var,c=colors[i],w=w))
         return 'float({}.a)'.format(var) if out.name == 'Alpha' else var
 
     def _bake_curve(self, mapping, curve, post=None, n=64):
@@ -1353,8 +1355,7 @@ def _variant(n):
     elif t == "VALTORGB":
         cr = n.color_ramp
         v = [getattr(cr, "interpolation", "LINEAR"), str(len(cr.elements))]
-        for e in cr.elements:
-            v.append(repr((float(e.position), tuple(float(c) for c in e.color))))
+
     return t + "|" + ",".join(v)
 
 
