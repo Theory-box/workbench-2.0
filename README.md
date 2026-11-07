@@ -6,14 +6,14 @@ Experimental Blender renderer with live material-node previews, shadows, and scr
 
 ## Status
 
-Published version: **0.19.10 beta**. Development and primary tests use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum; the new features have not been validated on 4.2.
+Published version: **0.19.11 beta**. Development and primary tests use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum; the new features have not been validated on 4.2.
 
 This release includes material parallax, height-field sun self-shadowing and AO,
 UV graph Blur caches, extended-UV alignment fixes, shared full-resolution caches
-for periodic textures, and live Color Ramp position/color edits. Screen-space
-contact shadows are not included.
+for periodic textures, live Color Ramp position/color edits, and opt-in screen-space
+sun contact shadows.
 
-### Unreleased branch: 0.19.11 contact-shadow test build
+### Sun contact shadows (0.19.11 beta)
 
 Render Properties > Workbench 2.0 > Lighting > Sun > **Contact Shadows** adds
 short-distance screen-space shadows to the live sun. It is off by default.
@@ -30,7 +30,7 @@ lightmaps are not darkened by this effect. Partial-alpha surfaces are skipped;
 hidden geometry and parallax height are not present in the scene depth. The effect
 is bypassed in scenes with active splat clouds until their compositors support
 separate sun output. Long traces, thin geometry, and screen boundaries remain
-limitations. This work is not in main or the published 0.19.10 release.
+limitations.
 
 Color Ramp stop positions and RGBA colors update as live uniforms, including in
 parallax height graphs and Blur sources. Adding/removing stops or changing the

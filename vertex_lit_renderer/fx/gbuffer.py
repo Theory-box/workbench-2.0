@@ -24,6 +24,7 @@ class GBuffer:
 
     def ensure(self, w, h, aux=False, contact=False):
         w = max(int(w), 1); h = max(int(h), 1)
+        aux = bool(aux or contact)  # sun occupies MRT slot 3 after the auxiliary slots
         if self.fb is not None and w == self.w and h == self.h and aux == self.aux and contact == self.contact:
             return
         self.w, self.h, self.aux = w, h, aux

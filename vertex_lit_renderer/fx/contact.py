@@ -36,7 +36,9 @@ void main() {
     vec4 sun = texture(uSun, vUV);
     float depth = texture(uDepth, vUV).r;
     fragColor = col;
-    if (depth >= 0.999999 || sun.a < 0.999 || max(sun.r, max(sun.g, sun.b)) <= 0.0) return;
+    // Only the exact clear depth is background. Perspective depth is very
+    // compressed at distance; an epsilon here rejects valid far geometry.
+    if (depth >= 1.0 || sun.a < 0.999 || max(sun.r, max(sun.g, sun.b)) <= 0.0) return;
     vec3 p = positionAt(vUV, depth);
     float stepSize = uLength / float(uSteps);
     float bias = max(0.0001, uThickness * 0.05);
@@ -51,7 +53,7 @@ void main() {
         vec2 uv = ndc.xy * 0.5 + 0.5;
         if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0))) || abs(ndc.z) >= 1.0) break;
         float d = texture(uDepth, uv).r;
-        if (d >= 0.999999) continue;
+        if (d >= 1.0) continue;
         float gap = positionAt(uv, d).z - q.z;
         if (gap > bias && gap < uThickness) {
             float border = min(min(uv.x, uv.y), min(1.0-uv.x, 1.0-uv.y));

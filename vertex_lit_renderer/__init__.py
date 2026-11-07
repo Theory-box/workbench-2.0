@@ -10,7 +10,7 @@ bl_info = {
                    "Lighting (diffuse + shadow + ambient) is computed per vertex "
                    "with per-pixel scene lighting, shadows, and live node materials. "
                    "Optional live material-node preview (transpiles the shader graph to GLSL).",
-    "warning":     "Unreleased contact-shadow test build. Early development beta; save work and test project copies.",
+    "warning":     "Early development beta; save work and test project copies. Experimental viewport-quality renderer.",
     "category":    "Render",
 }
 
