@@ -18,6 +18,7 @@ It uses Blender's GPU API and custom rasterization shaders. It is not a path tra
 - **Sun shadows:** shadow maps plus optional screen-space contact shadows for nearby detail.
 - **AO and cavity:** Classic SSAO, experimental XeGTAO-based AO, screen cavity, and outlines. A per-material Scene AO slider controls how much scene AO a surface receives.
 - **Height-map parallax:** the custom Workbench 2.0 Parallax node adds apparent relief without subdivision, with local sun self-shadowing, height AO, relief normals, and depth intersections with other objects. A global toggle lets you disable it across the scene.
+- **Standard Bump node:** height-based normal shading with live controls, image/procedural inputs, and support for chaining and parallax integration.
 - **General UV Blur node:** blur supported UV-based color or value graphs, including height maps, using automatically refreshed GPU caches.
 - **Baked planar reflections:** capture selected coplanar faces for a fixed camera, retain existing materials, and adjust supported roughness inputs live. Rebake or clear the reflection when needed.
 - **Cycles lightmaps:** Bake Selected automatically creates a separate lighting UV layout and bakes diffuse direct and indirect illumination. Resolution and samples are adjustable; rebake and clear are available in the sidebar.
@@ -37,7 +38,7 @@ For parallax, add **Workbench 2.0 Parallax** in the Shader Editor. Connect a UV-
 
 ## Compatibility and limitations
 
-**Current release: 0.19.16 beta.** Development and primary testing use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum, but current features have not been validated on 4.2. Other GPU vendors and large production scenes are not comprehensively tested; performance depends on scene complexity and enabled effects.
+**Current release: 0.19.17 beta.** Development and primary testing use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum, but current features have not been validated on 4.2. Other GPU vendors and large production scenes are not comprehensively tested; performance depends on scene complexity and enabled effects.
 
 - Shader-node support is incomplete. Materials can look different from Cycles or Eevee; custom nodes do not produce equivalent effects in those engines.
 - Parallax changes apparent surface depth, not mesh geometry or the outer silhouette. UV seams, extreme grazing angles, and complex height graphs have quality/performance limits.
@@ -49,6 +50,12 @@ For parallax, add **Workbench 2.0 Parallax** in the Shader Editor. Connect a UV-
 See the [feature guide](docs/FEATURE_GUIDE.md) for controls, tested behavior, cache restrictions, and further known limitations. Release notes record individual changes.
 
 ## Latest update
+
+**0.19.17 beta** adds support for Blender's standard **Bump** node (Strength, Distance, Filter Width, Invert, and normal chaining), plus **Cycles — Workbench Lighting** for lightmap baking. The new lighting mode transfers our Sun and Sky/Ground into a temporary Cycles rig, preserves mesh emission, and restores original lights/world afterward. **Cycles — Scene Lighting** retains the existing workflow. The silhouette-clipping experiment is not included.
+
+See the [Bump guide](docs/BUMP_NODE.md) and [lightmap lighting guide](docs/WORKBENCH_LIGHTMAP_LIGHTING.md) for tests and limitations.
+
+### Previous update
 
 **0.19.16 beta** adds the global Parallax toggle and separate Key Light, Sky/Ground, and Sun checkboxes. Disabling a control preserves its original settings. F12 tests verified that off matches zero intensity/depth and re-enabling restores the image; live viewport checks covered parallax and sky/ground switching.
 

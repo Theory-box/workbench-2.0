@@ -6,7 +6,7 @@ Experimental Blender renderer with live material-node previews, shadows, and scr
 
 ## Status
 
-Published version: **0.19.16 beta**. Development and primary tests use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum; the new features have not been validated on 4.2.
+Published version: **0.19.17 beta**. Development and primary tests use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum; the new features have not been validated on 4.2.
 
 Version **0.19.15** adds **Cavity World > Method > XeGTAO
 (experimental)**. Classic SSAO remains the default for existing scenes. This is
