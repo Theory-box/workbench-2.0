@@ -98,8 +98,10 @@ def draw(engine,depsgraph,view_projection):
                 if item is False:continue
                 sh,batch,res,_=item
                 from . import blur
+                blur.set_object(obj, depsgraph)
                 textures=blur.resolve_samplers([(s.uniform,s.image) for s in res.samplers])
                 sh.bind()
+                blur.bind_domains(sh, res.samplers)
                 sh.uniform_float('uViewProj',view_projection);sh.uniform_float('uModel',evaluated.matrix_world)
                 sh.uniform_float('uNormalMat',evaluated.matrix_world.to_3x3().inverted_safe().transposed())
                 for name,value in [('uGenMin',data['gen_min']),('uGenScale',data['gen_scale'])]:

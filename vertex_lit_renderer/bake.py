@@ -48,6 +48,7 @@ def bake_material_to_array(mat, res=1024):
                 except Exception: pass
             textures = blur.resolve_samplers([(s.uniform, s.image) for s in tr.samplers])
             shader.bind()
+            blur.bind_domains(shader, tr.samplers)
             for uni, gtex in textures:
                 if gtex is not None:
                     try: shader.uniform_sampler(uni, gtex)

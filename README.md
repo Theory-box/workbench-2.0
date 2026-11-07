@@ -6,7 +6,7 @@ Experimental Blender renderer with live material-node previews, shadows, and scr
 
 ## Status
 
-Published version: **0.19.3 beta**. This branch is **0.19.7 parallax AO beta**, not a release. Development and primary tests use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum.
+Published version: **0.19.3 beta**. This branch is **0.19.8 extended-UV blur beta**, not a release. Development and primary tests use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum.
 
 ## General UV Blur node (0.19.5 development beta)
 
@@ -16,9 +16,12 @@ procedural Noise/ramps/mixes, or before the Parallax node's Height. Color-to-val
 conversion works through Blender's usual socket connections. Group inputs and
 nested Blur nodes are supported.
 
-- **Radius**: Gaussian support radius in cache pixels (0–64).
+- **Radius**: Gaussian support radius at the requested pixels-per-UV resolution (0–64).
 - **Strength**: blend between unfiltered and filtered input (0–1).
-- **Resolution**: cached 0–1 UV tile size (128–2048). Increase for fine detail.
+- **Resolution**: requested pixels per UV unit (128–2048).
+- **Max Cache Edge**: appears for extended UV ranges, limits the automatic cache
+  dimensions (default 2048). Increase for finer detail on large UV layouts; the
+  64 MiB memory cap still applies. The node shows the resulting cache dimensions.
 - **Edges**: Repeat tiles the cache; Extend clamps it.
 
 Zero Radius, zero Strength, and muting bypass the cache exactly. Otherwise the
@@ -27,15 +30,21 @@ in two passes. Alpha is filtered premultiplied to avoid dark color fringes.
 
 Upstream values, connections, groups, animation, image pixels/color space/reloads,
 and Blur settings invalidate relevant cached results. Camera movement reuses them;
-mesh UV edits change sampling immediately. Undo/redo and file loading clear runtime
+mesh UV edits update sampling and cached coverage immediately. Undo/redo and file loading clear runtime
 caches. Caches are not saved into the blend file and do not create image datablocks.
 The retained texture cache is limited to 64 MiB, plus temporary rebuilding buffers.
 Dirty/generated source images receive one CPU content check per draw (shared among
 Blur nodes) because Blender does not expose a reliable pixel revision counter;
 large edited images can therefore still add redraw overhead.
 
-The cache is a **0–1 UV tile**, not an unbounded 3D blur: input graphs must use one
-UV coordinate domain. Nonperiodic graphs become tiled when Repeat is selected.
+The cache follows each object's actual UV range, including offset/negative UVs,
+with padding outside expanded bounds. This keeps nonperiodic procedural patterns
+aligned with unblurred color, rather than repeating an unrelated 0–1 tile. The same
+material can use different coverage on different objects. Existing 0–1 layouts
+retain their tile behavior; standalone albedo baking still evaluates a 0–1 tile.
+Inputs must use one UV coordinate domain. Sampling beyond the cached region still
+repeats or clamps according to Edges; extreme parallax travel can exceed the padding.
+Large layouts may need a higher Max Cache Edge to preserve small features.
 Different UV maps mixed upstream, Generated/Object/view-dependent inputs, movies,
 image sequences, and UDIMs are not supported; the node shows a warning and bypasses
 the blur. Other renderers receive a passthrough fallback. Existing limitations of
@@ -79,6 +88,10 @@ Only the connected, unmuted node on the active Material Output enables the effec
 The renderer traces the UV height field and derives relief normals for lighting.
 Color and alpha sampling on that map follows the intersection, in viewport and F12.
 Shared materials share the effect. Baked lightmap coordinates remain unchanged.
+A tested Cycles bake preserves surface UVs, parallax movement, local height AO and
+screen cavity. A lightmap replaces live lighting: its RGB values contain no light
+direction, so relief-normal relighting and live sun self-shadows do not affect the
+baked illumination. Directional lightmaps would be a separate lighting feature.
 Depth and quality edits use uniforms; they do not recompile the shader.
 
 This is apparent surface relief, not mesh displacement: silhouettes and shadows cast onto other objects

@@ -13,6 +13,10 @@ NODE_ID = 'VLRShaderNodeBlur'
 _cache = OrderedDict()
 _image_keys = {}
 _image_seen = {}
+_bounds_cache = OrderedDict()
+_domain_object = None
+_domain_depsgraph = None
+_coverage = {}
 _filter_shader = None
 _warnings = {}
 _MAX_BYTES = 64 * 1024 * 1024
@@ -32,11 +36,12 @@ def changed(self, context):
 class VLRShaderNodeBlur(bpy.types.ShaderNodeCustomGroup):
     bl_idname = NODE_ID
     bl_label = 'Workbench 2.0 Blur'
-    bl_description = 'Blur a color or value graph in its 0-1 UV tile; cached on the GPU'
+    bl_description = 'Blur a color or value graph across the object UV range; cached on the GPU'
     radius: FloatProperty(name='Radius', default=4, min=0, max=64,
-                          description='Gaussian support radius in cache pixels', update=changed)
+                          description='Gaussian support radius at the requested pixels-per-UV resolution', update=changed)
     strength: FloatProperty(name='Strength', default=1, min=0, max=1, update=changed)
-    resolution: EnumProperty(name='Resolution', items=[(str(n), str(n), '') for n in (128,256,512,1024,2048)], default='512', update=changed)
+    resolution: EnumProperty(name='Resolution', items=[(str(n), str(n), '') for n in (128,256,512,1024,2048)], default='512', description='Requested pixels per UV unit; large UV ranges are capped by Max Cache Edge', update=changed)
+    coverage_limit: EnumProperty(name='Max Cache Edge', items=[(str(n),str(n),'') for n in (512,1024,2048,4096)], default='2048', description='Limit cache dimensions for extended UV ranges; total cache memory is also bounded', update=changed)
     extension: EnumProperty(name='Edges', items=[('REPEAT','Repeat','Wrap the cached UV tile'),('EXTEND','Extend','Clamp to the edge of the cached UV tile')], default='REPEAT', update=changed)
 
     def init(self, context):
@@ -53,7 +58,11 @@ class VLRShaderNodeBlur(bpy.types.ShaderNodeCustomGroup):
     def draw_buttons(self, context, layout):
         layout.prop(self,'radius');layout.prop(self,'strength')
         layout.prop(self,'resolution');layout.prop(self,'extension')
-        layout.label(text='UV tile 0-1; color / value')
+        layout.label(text='Auto UV coverage; color / value')
+        coverage=_coverage.get((self.id_data.name,self.name))
+        if coverage:
+            layout.prop(self,'coverage_limit')
+            layout.label(text=str(coverage[0])+' x '+str(coverage[1])+' cache pixels')
         warning = _warnings.get((self.id_data.name,self.name))
         if warning:
             row=layout.row();row.alert=True;row.label(text=warning,icon='ERROR')
@@ -76,6 +85,8 @@ class Source:
         self.group_path = tuple(g.name for g,_ in parent._group_stack)
         self.key = (self.material,self.group_path,self.tree,self.node)
         self.name = 'Blur:' + repr(self.key)
+        self.domain = (0.0,0.0,1.0,1.0)
+        self.runtime_key = self.key
         if node.as_pointer() in parent.blur_stack or len(parent.blur_stack)>16:
             raise ValueError('Recursive blur graph')
         t=nt._Transpiler();t.named_uvs=True;t.owner_name=parent.owner_name
@@ -92,7 +103,7 @@ class Source:
         decl=''.join('uniform sampler2D '+s.uniform+';\n' for s in t.samplers)+'\n'.join(t.param_decls)
         function='vec4 computeBaseColor(vec2 vUV){\n'+body+'\n}'
         self.fragment=(shaders.BAKE_FRAG_HEAD+aliases+decl+glsl_lib.collect(function)+function+
-                       '\nvoid main(){vec4 c=computeBaseColor(vUV);fragColor=vec4(c.rgb*c.a,c.a);}')
+                       '\nuniform vec4 uBlurDomain;\nvoid main(){vec4 c=computeBaseColor(vUV*uBlurDomain.zw+uBlurDomain.xy);fragColor=vec4(c.rgb*c.a,c.a);}')
         if any(not getattr(s.image,'is_blur_source',False) and s.image.source in {'TILED','MOVIE','SEQUENCE'} for s in t.samplers):
             raise ValueError('Still images only in UV cache')
         self.params=t.params;self.samplers=t.samplers
@@ -123,7 +134,9 @@ def emit(t,node):
     sampler='uTx_'+str(len(t.samplers));t.samplers.append(Sampler(sampler,source))
     # Shader wrapping is explicit; Blender image sampler state is not changed.
     uv=t._new_var('blur_uv');var=t._new_var('blur')
-    t._line('vec2 '+uv+' = '+coord+';')
+    domain=sampler+'Domain'
+    t.param_decls.append('uniform vec4 '+domain+';')
+    t._line('vec2 '+uv+' = ('+coord+' - '+domain+'.xy) / '+domain+'.zw;')
     if node.extension=='REPEAT':uv='fract('+uv+')'
     else:uv='clamp('+uv+', vec2(0.5)/vec2(textureSize('+sampler+',0)), vec2(1.0)-vec2(0.5)/vec2(textureSize('+sampler+',0)))'
     t._line('vec4 '+var+' = texture('+sampler+', '+uv+');')
@@ -132,6 +145,64 @@ def emit(t,node):
 
 def begin_frame():
     _image_keys.clear()
+    set_object()
+
+
+def set_object(obj=None, depsgraph=None):
+    global _domain_object, _domain_depsgraph
+    _domain_object, _domain_depsgraph = obj, depsgraph
+
+
+def domain_for(source):
+    obj = _domain_object
+    if obj is None or obj.type != 'MESH': return (0.0,0.0,1.0,1.0)
+    key = (obj.as_pointer(),obj.data.as_pointer(),source.uv_name)
+    if key in _bounds_cache:
+        _bounds_cache.move_to_end(key)
+        return _bounds_cache[key]
+    evaluated = obj.evaluated_get(_domain_depsgraph) if _domain_depsgraph else obj
+    editing = obj.data.is_editmode and _domain_depsgraph is not None
+    mesh = evaluated.to_mesh() if editing else evaluated.data
+    domain = (0.0,0.0,1.0,1.0)
+    try:
+        uv = mesh.uv_layers.get(source.uv_name) if source.uv_name else next(
+            (layer for layer in mesh.uv_layers if layer.active_render),mesh.uv_layers.active)
+        if uv is not None and len(uv.data):
+            a=np.empty(len(uv.data)*2,dtype=np.float32);uv.data.foreach_get('uv',a);a=a.reshape(-1,2)
+            a=a[np.isfinite(a).all(axis=1)]
+            if len(a):
+                lo=a.min(axis=0);hi=a.max(axis=0)
+                if (lo < -1e-5).any() or (hi > 1.00001).any():
+                    # One extra UV tile protects filtered edges and ordinary parallax travel.
+                    lo=np.floor(lo)-1;hi=np.ceil(hi)+1
+                    domain=tuple(float(x) for x in (*lo,*(hi-lo)))
+    finally:
+        if editing:evaluated.to_mesh_clear()
+    _bounds_cache[key]=domain
+    while len(_bounds_cache)>256:_bounds_cache.popitem(last=False)
+    return domain
+
+
+@persistent
+def geometry_changed(scene, depsgraph):
+    if any(isinstance(u.id,bpy.types.Mesh) or
+           isinstance(u.id,bpy.types.Object) and u.is_updated_geometry
+           for u in depsgraph.updates):
+        _bounds_cache.clear()
+
+
+def domain_values(samplers):
+    result=[]
+    for sampler in samplers:
+        name,image = (sampler.uniform,sampler.image) if hasattr(sampler,'uniform') else sampler
+        if getattr(image,'is_blur_source',False):result.append((name+'Domain',image.domain))
+    return result
+
+
+def bind_domains(shader,samplers):
+    for name,value in domain_values(samplers):
+        try:shader.uniform_float(name,value)
+        except ValueError:pass
 
 
 def image_key(image):
@@ -208,6 +279,8 @@ def texture(source):
     global _filter_shader
     from . import shaders,engine
     node,tree=source.get_node()
+    source.domain=domain_for(source)
+    source.runtime_key=source.key if source.domain==(0.0,0.0,1.0,1.0) else (source.key,source.domain)
     values=tuple((p.uniform,p.value(tree)) for p in source.params)
     textures=[];dependencies=[]
     # Refresh all children before acquiring image handles (a child can refresh a
@@ -217,11 +290,11 @@ def texture(source):
         image=sampler.image
         if getattr(image,'is_blur_source',False) and image.key not in children:
             tex=engine._get_gpu_tex(image)
-            children[image.key]=(tex,_cache[image.key]['signature'])
+            children[image.key]=(tex,_cache[image.runtime_key]['signature'],image.domain,image.runtime_key)
     for sampler in source.samplers:
         image=sampler.image
         if getattr(image,'is_blur_source',False):
-            tex,dependency=children[image.key]
+            tex,dependency,image.domain,image.runtime_key=children[image.key]
         else:
             dependency=image_key(image)
             previous=_image_seen.get(image.as_pointer())
@@ -232,29 +305,34 @@ def texture(source):
         if tex is None:raise ValueError('Blur source texture unavailable')
         textures.append((sampler.uniform,tex));dependencies.append(dependency)
     res=int(node.resolution)
-    signature=(source.fragment,values,tuple(dependencies),res,float(node.radius),float(node.strength),node.extension)
-    entry=_cache.get(source.key)
+    span=source.domain[2:]
+    density=min(float(res),float(node.coverage_limit)/max(span),(_MAX_BYTES/(8.0*span[0]*span[1]))**0.5)
+    width=max(1,int(span[0]*density));height=max(1,int(span[1]*density))
+    if source.domain!=(0.0,0.0,1.0,1.0):_coverage[source.tree,source.node]=(width,height)
+    else:_coverage.pop((source.tree,source.node),None)
+    signature=(source.fragment,values,tuple(dependencies),res,float(node.radius),float(node.strength),node.extension,width,height,source.domain)
+    entry=_cache.get(source.runtime_key)
     if entry is not None and entry['signature']==signature:
-        _cache.move_to_end(source.key);stats['hits']+=1
+        _cache.move_to_end(source.runtime_key);stats['hits']+=1
         return entry['texture']
     old_view=gpu.state.viewport_get();old_blend=gpu.state.blend_get()
     old_depth=gpu.state.depth_test_get();old_mask=gpu.state.depth_mask_get()
     try:
         gpu.state.blend_set('NONE');gpu.state.depth_test_set('NONE');gpu.state.depth_mask_set(False)
         shader=entry["shader"] if entry is not None and entry["fragment"]==source.fragment else gpu.types.GPUShader(shaders.PLANE_BAKE_VERT,source.fragment)
-        original=gpu.types.GPUTexture((res,res),format='RGBA16F')
-        scratch=gpu.types.GPUTexture((res,res),format='RGBA16F')
-        result=gpu.types.GPUTexture((res,res),format='RGBA16F')
-        _draw(shader,original,textures,values)
+        original=gpu.types.GPUTexture((width,height),format='RGBA16F')
+        scratch=gpu.types.GPUTexture((width,height),format='RGBA16F')
+        result=gpu.types.GPUTexture((width,height),format='RGBA16F')
+        _draw(shader,original,textures,list(values)+[('uBlurDomain',source.domain)]+domain_values(source.samplers))
         if _filter_shader is None:_filter_shader=gpu.types.GPUShader(shaders.PLANE_BAKE_VERT,_FILTER)
-        settings=[('radius',float(node.radius)),('strength',float(node.strength)),('repeatEdges',int(node.extension=='REPEAT'))]
-        _draw(_filter_shader,scratch,[('source',original),('original',original)],settings+[('direction',(1/res,0)),('vertical',0)])
-        _draw(_filter_shader,result,[('source',scratch),('original',original)],settings+[('direction',(0,1/res)),('vertical',1)])
+        settings=[('strength',float(node.strength)),('repeatEdges',int(node.extension=='REPEAT'))]
+        _draw(_filter_shader,scratch,[('source',original),('original',original)],settings+[('radius',float(node.radius)*width/(span[0]*res)),('direction',(1/width,0)),('vertical',0)])
+        _draw(_filter_shader,result,[('source',scratch),('original',original)],settings+[('radius',float(node.radius)*height/(span[1]*res)),('direction',(0,1/height)),('vertical',1)])
     finally:
         gpu.state.viewport_set(*old_view);gpu.state.blend_set(old_blend)
         gpu.state.depth_test_set(old_depth);gpu.state.depth_mask_set(old_mask)
-    _cache[source.key]={'signature':signature,'texture':result,'bytes':res*res*8,'shader':shader,'fragment':source.fragment}
-    _cache.move_to_end(source.key);stats['builds']+=1
+    _cache[source.runtime_key]={'signature':signature,'texture':result,'bytes':width*height*8,'shader':shader,'fragment':source.fragment}
+    _cache.move_to_end(source.runtime_key);stats['builds']+=1
     while sum(v['bytes'] for v in _cache.values())>_MAX_BYTES and len(_cache)>1:_cache.popitem(last=False)
     stats['bytes']=sum(v['bytes'] for v in _cache.values())
     return result
@@ -263,7 +341,7 @@ def texture(source):
 @persistent
 def clear(*args):
     global _filter_shader
-    _cache.clear();_image_keys.clear();_image_seen.clear();_warnings.clear();_filter_shader=None
+    _cache.clear();_image_keys.clear();_image_seen.clear();_warnings.clear();_bounds_cache.clear();_coverage.clear();set_object();_filter_shader=None
     stats['bytes']=0
 
 
@@ -272,8 +350,11 @@ def resolve_samplers(samplers):
     prepared={};shared={}
     for name,image in samplers:
         if getattr(image,'is_blur_source',False):
-            if image.key not in shared:shared[image.key]=_get_gpu_tex(image)
-            prepared[name]=shared[image.key]
+            if image.key not in shared:
+                tex=_get_gpu_tex(image)
+                shared[image.key]=(tex,image.domain,image.runtime_key)
+            tex,image.domain,image.runtime_key=shared[image.key]
+            prepared[name]=tex
     return [(name,prepared[name] if name in prepared else _get_gpu_tex(image)) for name,image in samplers]
 
 
@@ -286,6 +367,7 @@ def undo_reset(*args):
 
 def register():
     bpy.utils.register_class(VLRShaderNodeBlur);bpy.types.NODE_MT_add.append(menu)
+    if geometry_changed not in bpy.app.handlers.depsgraph_update_post:bpy.app.handlers.depsgraph_update_post.append(geometry_changed)
     if clear not in bpy.app.handlers.load_post:bpy.app.handlers.load_post.append(clear)
     for handlers in (bpy.app.handlers.undo_post,bpy.app.handlers.redo_post):
         if undo_reset not in handlers:handlers.append(undo_reset)
@@ -293,6 +375,7 @@ def register():
 
 def unregister():
     clear()
+    if geometry_changed in bpy.app.handlers.depsgraph_update_post:bpy.app.handlers.depsgraph_update_post.remove(geometry_changed)
     if clear in bpy.app.handlers.load_post:bpy.app.handlers.load_post.remove(clear)
     for handlers in (bpy.app.handlers.undo_post,bpy.app.handlers.redo_post):
         if undo_reset in handlers:handlers.remove(undo_reset)

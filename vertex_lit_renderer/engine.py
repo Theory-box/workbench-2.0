@@ -2194,7 +2194,7 @@ class VertexLitEngine(bpy.types.RenderEngine):
             if prog is not None:
                 sh=instance_shader if instance_shader is not None else prog['shader']
                 binding_changed = params_bound.get(id(sh)) is not prog
-                rebind_samplers = last_shader[0] is not sh or binding_changed
+                rebind_samplers = last_shader[0] is not sh or binding_changed or prog.get('has_blur', False)
                 _ensure_frame(sh)
                 if aux_on:
                     try:
@@ -2208,8 +2208,10 @@ class VertexLitEngine(bpy.types.RenderEngine):
                         except Exception: pass
                     params_bound[id(sh)] = prog
                 if rebind_samplers:
+                    blur.set_object(bpy.data.objects.get(oname), depsgraph)
                     textures = blur.resolve_samplers(prog['samplers'])
                     sh.bind()  # A blur cache rebuild uses its own GPU program.
+                    blur.bind_domains(sh, prog['samplers'])
                     if prog.get('has_blur'):
                         try: sh.uniform_sampler('uShadowMap', shad_tex)
                         except (ValueError, TypeError): pass
