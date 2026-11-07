@@ -18,3 +18,11 @@ no longer used to choose object bake settings.
 Validated with mixed 128/256 images, different sample/pass settings in one selection,
 direct/indirect/both outputs, cancellation in the second batch, and save/reopen.
 The 2048 default is asserted without allocating an unnecessary large test bake.
+
+## Responsive baking
+
+The Bake Selected button starts native asynchronous Cycles bake jobs. Object preparation yields between objects, and matching per-object settings are baked in successive jobs. Blender keeps redrawing during the bake; Esc cancels it. Scene input is temporarily locked while private meshes/materials and temporary lighting are in use. Completed images are published only after all groups finish. Cancellation restores the previous bakes and original modifiers/lighting after the native job has stopped.
+
+UV unwrap/packing and final image packing still execute on the main thread and can pause briefly on large meshes/images. This does not promise uninterrupted interaction during those preparation/finalization steps.
+
+Validation: Blender 4.4.3 native UI job test with two sample-setting groups, timer heartbeat during active jobs, simulated Esc cancellation, previous-image/mesh preservation, modifier/world restoration, and handler cleanup. Existing per-object pass/settings and modifier cancellation/error regression tests pass. Native lifecycle was checked against Blender v4.4.3 `object_bake_api.cc`.
