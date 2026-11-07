@@ -64,6 +64,8 @@ class Pipeline:
         # Supersampling: render the whole pipeline at ss*resolution and downscale on the
         # final blit for smooth edges (SSAA). ss=1 -> no change.
         ss = {'1': 1.0, '1.5': 1.5, '2': 2.0}.get(getattr(vls, 'supersampling', '1'), 1.0)
+        if ctx.get('quick_supersampling', False):
+            ss = 1.0
         sw, sh = max(int(w * ss), 1), max(int(h * ss), 1)
         want_aux = bool(ctx.get('want_aux'))
         self.gbuf.ensure(sw, sh, aux=want_aux, contact=bool(ctx.get("contact_enabled")))

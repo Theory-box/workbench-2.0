@@ -2633,6 +2633,7 @@ class VertexLitEngine(bpy.types.RenderEngine):
             self._view_draw(context, depsgraph)
         finally:
             self._quick_parallax = False
+            self._quick_supersampling = False
 
     def _view_draw(self, context, depsgraph):
         self._ensure_state()
@@ -2801,6 +2802,7 @@ class VertexLitEngine(bpy.types.RenderEngine):
                     depsgraph, vls, view_proj, rv3d.view_matrix.to_3x3(), proj,
                     rw, rh, wc, studio, ls_mat, sky, ground, bstr, lights,
                     do_shad=do_shad, s_bias=s_bias, s_soft=s_dark, shad_tex=shad_tex)
+                post_ctx['quick_supersampling'] = getattr(self, '_quick_supersampling', False)
                 self._stoch_view = True          # stochastic splats may use the G-buffer depth
                 try:
                     final_tex, sw, sh = post.render(rw, rh, draw_scene, post_ctx, vls, blit=False)

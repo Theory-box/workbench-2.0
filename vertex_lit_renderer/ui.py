@@ -181,7 +181,9 @@ class VERTEX_LIT_PT_settings(bpy.types.Panel):
             return
         col = body.column()
         col.prop(s, 'aa_method')
-        col.prop(s, 'supersampling')
+        row = col.row(align=True)
+        row.prop(s, 'supersampling')
+        row.prop(s, 'quick_supersampling')
 
     def draw_bake(self, context, s, root):
         body = section(root, "VLR_bake", "Bake", default_closed=True)

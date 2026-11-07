@@ -251,6 +251,8 @@ class VertexLitSettings(bpy.types.PropertyGroup):
                ('FXAA', "FXAA", "Fast approximate anti-aliasing (post-process edge smoothing)")],
         default='FXAA',
         description="Edge anti-aliasing method")
+    quick_supersampling: bpy.props.BoolProperty(name="Quick", default=False,
+        description="Use 1x supersampling during viewport movement and playback; restore the selected level after 0.067 seconds idle. Final renders remain full quality")
     supersampling: bpy.props.EnumProperty(
         name="Supersampling",
         items=[('1', "1x (off)", "No supersampling"),

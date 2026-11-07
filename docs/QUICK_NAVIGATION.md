@@ -16,3 +16,13 @@ is promised.
 Blender 4.4.3 checks: native viewport transform/navigation activation, pixel changes
 and automatic idle restoration, quick viewport playback, identical F12 on/off
 output, and two final animation frames identical to the full-quality reference.
+
+## Quick Supersampling
+
+The separate Quick checkbox beside Supersampling uses 1x during viewport movement,
+object transforms, Edit Mode geometry updates, and viewport playback. It restores
+the saved supersampling level after the same ~0.067-second idle delay. It works
+independently of parallax Quick Navigation and never modifies the saved value.
+FXAA and other effects remain enabled. F12 stills and animation keep full quality.
+Native Blender 4.4.3 tests verified actual G-buffer dimensions during movement and
+restoration, independent parallax controls, and identical final still/animation output.

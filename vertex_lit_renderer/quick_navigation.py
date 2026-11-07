@@ -20,7 +20,9 @@ def update(engine, context, settings):
     changed = getattr(engine, '_quick_motion_pending', False)
     engine._quick_motion_pending = False
     playing = getattr(context.screen, 'is_animation_playing', False)
-    enabled = bool(settings and settings.use_parallax and settings.quick_navigation)
+    parallax = bool(settings and settings.use_parallax and settings.quick_navigation)
+    supersampling = bool(settings and settings.quick_supersampling and settings.supersampling != '1')
+    enabled = parallax or supersampling
     if enabled and ((previous is not None and previous != signature)
                     or getattr(rv, 'is_navigating', False) or playing):
         changed = True
@@ -28,7 +30,8 @@ def update(engine, context, settings):
     if enabled and changed:
         engine._quick_changed = now
     active = enabled and now - getattr(engine, '_quick_changed', -1000.0) < IDLE_DELAY
-    engine._quick_parallax = active
+    engine._quick_parallax = active and parallax
+    engine._quick_supersampling = active and supersampling
     if active and not getattr(engine, '_quick_timer', False):
         engine._quick_timer = True
         area = context.area
