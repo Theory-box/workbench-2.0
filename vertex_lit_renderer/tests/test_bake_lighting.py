@@ -18,7 +18,7 @@ def run():
   lamp=bpy.data.lights.new('Existing light','POINT');lamp.energy=1000
   existing=bpy.data.objects.new('Existing light',lamp);sc.collection.objects.link(existing);existing.location=(0,0,2)
   original=sc.world;original.use_nodes=True;original.node_tree.nodes.get('Background').inputs['Strength'].default_value=5
-  s=sc.vertex_lit;settings=sc.vlr_lightmap_settings;settings.resolution='128';settings.samples=32;settings.lighting_source='WORKBENCH'
+  s=sc.vertex_lit;settings=ob.vlr_lightmap_settings;settings.resolution='128';settings.samples=32;settings.lighting_source='WORKBENCH'
   s.key_intensity=4;s.sun_intensity=.8;s.sun_elevation=.7;s.sun_azimuth=1.2;s.sun_color=(1,1,1)
   s.sky_color=(.6,.4,.2);s.ground_color=(.1,.2,.3);s.hemi_intensity=1
   counts=(len(bpy.data.worlds),len(bpy.data.lights),len(bpy.data.objects))

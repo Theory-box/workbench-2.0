@@ -7,8 +7,12 @@ class VLRLightmapSettings(bpy.types.PropertyGroup):
     lighting_source: bpy.props.EnumProperty(name='Lighting', items=[
         ('WORKBENCH', 'Cycles — Workbench Lighting', 'Use Workbench Sun and Sky/Ground; ignore existing lights/world, retain emission'),
         ('SCENE', 'Cycles — Scene Lighting', 'Use the existing scene lights and world')], default='SCENE')
-    resolution: bpy.props.EnumProperty(name='Resolution', items=[(str(n), str(n), '') for n in (128, 256, 512, 1024, 2048, 4096)], default='1024')
+    resolution: bpy.props.EnumProperty(name='Resolution', items=[(str(n), str(n), '') for n in (128, 256, 512, 1024, 2048, 4096)], default='2048')
     samples: bpy.props.IntProperty(name='Samples', default=64, min=1, max=4096)
+    passes: bpy.props.EnumProperty(name='Lighting Passes', items=[
+        ('BOTH', 'Direct + Indirect', 'Bake direct illumination and bounced light'),
+        ('DIRECT', 'Direct', 'Bake direct illumination only'),
+        ('INDIRECT', 'Indirect', 'Bake bounced illumination only')], default='BOTH')
 
 
 class VLRLightmapState(bpy.types.PropertyGroup):
@@ -17,8 +21,9 @@ class VLRLightmapState(bpy.types.PropertyGroup):
     status: bpy.props.StringProperty(default='Not baked')
 
 
-def _cycles_bake(uv_name, margin):
-    return bpy.ops.object.bake(type='DIFFUSE', pass_filter={'DIRECT', 'INDIRECT'},
+def _cycles_bake(uv_name, margin, passes='BOTH'):
+    selected_passes = {'DIRECT', 'INDIRECT'} if passes == 'BOTH' else {passes}
+    return bpy.ops.object.bake(type='DIFFUSE', pass_filter=selected_passes,
                               target='IMAGE_TEXTURES', save_mode='INTERNAL',
                               uv_layer=uv_name, use_selected_to_active=False,
                               use_clear=True, margin=margin, margin_type='EXTEND')
@@ -84,8 +89,6 @@ def _bake_selected_base(context):
         if any(mod.show_render != mod.show_viewport for mod in ob.modifiers):
             raise ValueError(ob.name + ': modifier viewport/render visibility must match for baking')
     scene = context.scene
-    resolution = int(scene.vlr_lightmap_settings.resolution)
-    margin = max(2, min(16, resolution // 128))
     selected = list(context.selected_objects)
     active = context.view_layer.objects.active
     engine, samples = scene.render.engine, scene.cycles.samples
@@ -110,14 +113,18 @@ def _bake_selected_base(context):
     try:
         for space in views: space.shading.type = 'SOLID'
         scene.render.engine = 'CYCLES'
-        scene.cycles.samples = scene.vlr_lightmap_settings.samples
         for ob in objects:
+            settings = ob.vlr_lightmap_settings
+            resolution = int(settings.resolution)
+            margin = max(2, min(16, resolution // 128))
+            config = (resolution, settings.samples, settings.lighting_source, settings.passes)
             original = ob.data
             mesh = original.copy()
             selection = [(collection, [element.select for element in collection]) for collection in (mesh.vertices, mesh.edges, mesh.polygons)]
             hidden = [(collection, [element.hide for element in collection]) for collection in (mesh.vertices, mesh.edges, mesh.polygons)]
             record = {'hidden': hidden, 'selection': selection, 'object': ob, 'original': original, 'mesh': mesh,
-                      'slots': [(slot.link, slot.material) for slot in ob.material_slots], 'image': None}
+                      'slots': [(slot.link, slot.material) for slot in ob.material_slots], 'image': None,
+                      'config': config, 'margin': margin}
             staged.append(record)
             ob.data = mesh
             # Preserve both the editable UV selection and the UV set used by textures.
@@ -162,21 +169,28 @@ def _bake_selected_base(context):
                     for node in material.node_tree.nodes: node.select = False
                     target.select = True; material.node_tree.nodes.active = target
                 slot.link = 'DATA'; slot.material = material
-        bpy.ops.object.select_all(action='DESELECT')
-        for ob in objects: ob.select_set(True)
-        context.view_layer.objects.active = objects[0]
+        # Keep staging transactional, but batch only targets with matching settings.
+        groups = {}
+        for record in staged: groups.setdefault(record['config'], []).append(record)
         from .bake_lighting import lighting_source
-        with lighting_source(scene, scene.vlr_lightmap_settings.lighting_source):
-            context.view_layer.update()
-            if _cycles_bake(uv_name, margin) != {'FINISHED'}:
-                raise RuntimeError('Cycles lightmap bake was cancelled')
+        for config, records in groups.items():
+            resolution, bake_samples, source, passes = config
+            scene.cycles.samples = bake_samples
+            bpy.ops.object.select_all(action='DESELECT')
+            for record in records: record['object'].select_set(True)
+            context.view_layer.objects.active = records[0]['object']
+            with lighting_source(scene, source):
+                context.view_layer.update()
+                if _cycles_bake(uv_name, records[0]['margin'], passes) != {'FINISHED'}:
+                    raise RuntimeError('Cycles lightmap bake was cancelled')
         for record in staged:
             record['image'].pack()
         for record in staged:
             ob = record['object']; state = ob.vlr_lightmap
             old_image = state.image
             state.uv_name = uv_name; state.image = record['image']
-            state.status = 'Baked: ' + str(resolution) + ' px, ' + str(scene.vlr_lightmap_settings.samples) + ' samples'
+            resolution, bake_samples, source, passes = record['config']
+            state.status = 'Baked: ' + str(resolution) + ' px, ' + str(bake_samples) + ' samples, ' + passes.title()
             if old_image is not None and old_image.get('vlr_lightmap_owned') and old_image.users == 0:
                 from .engine import _invalidate_tex
                 _invalidate_tex(old_image.name); bpy.data.images.remove(old_image)
@@ -292,13 +306,20 @@ class VLR_PT_lightmap(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
-        settings = context.scene.vlr_lightmap_settings
+        ob = context.active_object
+        if ob is None or ob.type != 'MESH':
+            layout.label(text='Select a mesh to edit bake settings')
+            return
+        settings = ob.vlr_lightmap_settings
+        layout.label(text='Settings: ' + ob.name)
         layout.prop(settings, 'lighting_source')
+        layout.prop(settings, 'passes')
         if settings.lighting_source == 'WORKBENCH':
             layout.label(text='Sun + Sky/Ground; emission retained')
             layout.label(text='Key Light excluded')
         layout.prop(settings, 'resolution'); layout.prop(settings, 'samples')
         layout.label(text='Target modifiers disabled during bake', icon='INFO')
+        layout.label(text='Each selected object uses its own settings')
         layout.operator('vertex_lit.lightmap_bake')
         layout.operator('vertex_lit.lightmap_clear')
         ob = context.active_object
@@ -311,10 +332,12 @@ _CLASSES = (VLRLightmapSettings, VLRLightmapState, VLR_OT_lightmap_bake, VLR_OT_
 def register():
     for cls in _CLASSES: bpy.utils.register_class(cls)
     bpy.types.Scene.vlr_lightmap_settings = bpy.props.PointerProperty(type=VLRLightmapSettings)
+    bpy.types.Object.vlr_lightmap_settings = bpy.props.PointerProperty(type=VLRLightmapSettings)
     bpy.types.Object.vlr_lightmap = bpy.props.PointerProperty(type=VLRLightmapState)
 
 
 def unregister():
+    del bpy.types.Object.vlr_lightmap_settings
     del bpy.types.Object.vlr_lightmap
     del bpy.types.Scene.vlr_lightmap_settings
     for cls in reversed(_CLASSES): bpy.utils.unregister_class(cls)

@@ -8,7 +8,7 @@ def run():
   ob,m,n=f.setup();sc=bpy.context.scene;sc.world.use_nodes=True;sc.world.node_tree.nodes.get('Background').inputs['Strength'].default_value=1;sc.world.node_tree.nodes.get('Background').inputs['Color'].default_value=(1,1,1,1)
   original=np.empty(len(ob.data.loops)*2,dtype=np.float32);ob.data.uv_layers['UVMap'].data.foreach_get('uv',original)
   active=next(uv.name for uv in ob.data.uv_layers if uv.active_render)
-  sc.vlr_lightmap_settings.resolution='128';sc.vlr_lightmap_settings.samples=8
+  ob.vlr_lightmap_settings.resolution='128';ob.vlr_lightmap_settings.samples=8
   assert bpy.ops.vertex_lit.lightmap_bake()=={'FINISHED'}
   now=np.empty_like(original);ob.data.uv_layers['UVMap'].data.foreach_get('uv',now);assert np.array_equal(now,original)
   assert next(uv.name for uv in ob.data.uv_layers if uv.active_render)==active

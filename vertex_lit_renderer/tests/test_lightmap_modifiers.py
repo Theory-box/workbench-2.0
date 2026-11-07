@@ -12,7 +12,7 @@ try:
  disabled=ob.modifiers.new('Disabled','SUBSURF');disabled.show_viewport=False;disabled.show_render=False
  state=[(m.show_viewport,m.show_render) for m in ob.modifiers]
  sc=bpy.context.scene;sc.render.engine='VERTEX_LIT';sc.cycles.device='CPU'
- sc.vlr_lightmap_settings.resolution='128';sc.vlr_lightmap_settings.samples=1
+ ob.vlr_lightmap_settings.resolution='128';ob.vlr_lightmap_settings.samples=1
  original=lightmap._cycles_bake
  def checked(*args):
   assert all(not m.show_viewport and not m.show_render for m in ob.modifiers)

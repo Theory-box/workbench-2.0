@@ -27,7 +27,7 @@ try:
  original_uv=np.empty(len(original.loops)*2,dtype=np.float32);original.uv_layers.active.data.foreach_get('uv',original_uv)
  bpy.ops.object.light_add(type='AREA',location=(0,-1,3));bpy.context.object.data.energy=300;bpy.context.object.data.size=2
  bpy.ops.object.select_all(action='DESELECT');a.select_set(True);b.select_set(True);bpy.context.view_layer.objects.active=a
- sc.vlr_lightmap_settings.resolution='128';sc.vlr_lightmap_settings.samples=8
+ for target in (a,b):target.vlr_lightmap_settings.resolution='128';target.vlr_lightmap_settings.samples=8
  before_nodes=len(wall.node_tree.nodes);before_active=wall.node_tree.nodes.active
  before_bake=sc.render.bake.margin;before_materials=len(bpy.data.materials)
  assert bpy.ops.vertex_lit.lightmap_bake()=={'FINISHED'}

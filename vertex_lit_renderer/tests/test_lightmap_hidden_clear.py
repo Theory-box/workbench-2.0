@@ -10,8 +10,8 @@ try:
     ob = bpy.context.object
     for collection in (ob.data.vertices, ob.data.edges, ob.data.polygons):
         for element in collection: element.hide = True; element.select = False
-    bpy.context.scene.vlr_lightmap_settings.resolution = '128'
-    bpy.context.scene.vlr_lightmap_settings.samples = 1
+    ob.vlr_lightmap_settings.resolution = '128'
+    ob.vlr_lightmap_settings.samples = 1
     assert bpy.ops.vertex_lit.lightmap_bake() == {'FINISHED'}
     uv = ob.data.uv_layers[ob.vlr_lightmap.uv_name]
     for face in ob.data.polygons:
