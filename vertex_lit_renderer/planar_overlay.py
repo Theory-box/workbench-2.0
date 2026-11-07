@@ -96,7 +96,10 @@ def draw(engine,depsgraph,view_projection):
                         print('[VertexLit] planar material skipped:',mat.name,str(exc))
                         item=cache[key]=False
                 if item is False:continue
-                sh,batch,res,_=item;sh.bind()
+                sh,batch,res,_=item
+                from . import blur
+                textures=blur.resolve_samplers([(s.uniform,s.image) for s in res.samplers])
+                sh.bind()
                 sh.uniform_float('uViewProj',view_projection);sh.uniform_float('uModel',evaluated.matrix_world)
                 sh.uniform_float('uNormalMat',evaluated.matrix_world.to_3x3().inverted_safe().transposed())
                 for name,value in [('uGenMin',data['gen_min']),('uGenScale',data['gen_scale'])]:
@@ -108,7 +111,7 @@ def draw(engine,depsgraph,view_projection):
                 for p in res.params:
                     try:sh.uniform_float(p.uniform,p.value(mat.node_tree))
                     except ValueError:pass
-                for s in res.samplers:sh.uniform_sampler(s.uniform,gpu.texture.from_image(s.image))
+                for uniform,texture in textures:sh.uniform_sampler(uniform,texture)
                 batch.draw(sh)
         for key in list(cache):
             if key not in live:del cache[key]

@@ -84,6 +84,8 @@ def mark_dirty(name):
 def invalidate(name=None):
     _instancing.clear()
     if name is None:
+        from . import blur
+        blur.clear()
         _prog_cache.clear(); _dirty_mats.clear()
         _shader_cache.clear()
     else:
@@ -124,6 +126,7 @@ def _compile(mat, mode):
         ent["shader"] = shader
         ent["samplers"] = [(s.uniform, s.image) for s in res.samplers]
         ent["params"] = res.params
+        ent["has_blur"] = any(getattr(s.image, "is_blur_source", False) for s in res.samplers)
         ent["has_alpha"] = res.has_alpha
         ent["frag"] = frag
     except Exception as e:                      # pragma: no cover (GPU-side)
@@ -142,6 +145,8 @@ def get_program(mat, mode="PIXEL", may_compile=True):
     key = (name, mode)
     ent = _prog_cache.get(key)
     dirty = name in _dirty_mats
+    if ent is not None and ent.get("has_blur") and ent["sig"] != _nt.topo_signature(mat):
+        dirty = True
 
     if ent is not None and not dirty:
         return ent

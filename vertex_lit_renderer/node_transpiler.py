@@ -139,6 +139,9 @@ class _Transpiler:
     def __init__(self):
         self.uv_maps = {}
         self.named_uvs = False
+        self.owner_name = None
+        self.blur_stack = ()
+        self.uv_roots = set()
         self.parallax_shift = None
         self.parallax_uv_matches = {}
         self.lines = []
@@ -280,6 +283,11 @@ class _Transpiler:
                 expr = self._neutral_for(node, out_socket)
             self._sock_var[key] = expr
             return expr
+        if node.bl_idname == 'VLRShaderNodeBlur':
+            from . import blur
+            expr = blur.emit(self, node)
+            self._sock_var[key] = expr
+            return expr
         handler = getattr(self, "_n_" + node.type.lower(), None)
         if handler is None:
             # Unsupported node -> emit a TYPE-APPROPRIATE neutral and keep going.
@@ -311,6 +319,7 @@ class _Transpiler:
     # =================== node handlers ===================================
 
     def _uv_expr(self, name, source):
+        self.uv_roots.add(name)
         if self.parallax_shift is None:
             return source
         uniform = self.parallax_uv_matches.get(name)
@@ -1189,6 +1198,7 @@ def transpile_material(mat, parallax_enabled=False):
 
     base = _find_base_socket(mat)
     t = _Transpiler()
+    t.owner_name = mat.name
     t.named_uvs = True
     parallax_glsl = ""
     parallax_source = None
@@ -1305,6 +1315,8 @@ def _tree_sig(nt, seen):
 def _variant(n):
     t = n.type
     v = []
+    if n.bl_idname == "VLRShaderNodeBlur":
+        return "VLR_BLUR|" + n.extension + "|" + str(n.radius <= 0 or n.strength <= 0)
     if n.bl_idname == "VLRShaderNodeParallax":
         return "VLR_PARALLAX|" + n.uv_map
     if t in ("OUTPUT_MATERIAL", "GROUP_OUTPUT"):
@@ -1359,6 +1371,7 @@ def transpile_reflection_properties(mat):
         raise ValueError('Planar reflection requires a supported Principled or Diffuse surface')
     node = base.node
     t = _Transpiler()
+    t.owner_name = mat.name
     def value(name, default):
         socket = node.inputs.get(name)
         return t.input_expr(node, socket, 'float') if socket is not None else str(default)

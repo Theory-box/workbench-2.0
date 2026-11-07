@@ -328,6 +328,9 @@ def _invalidate_tex(name):
 
 def _get_gpu_tex(image):
     if image is None: return None
+    if getattr(image, 'is_blur_source', False):
+        from . import blur
+        return blur.texture(image)
     if image.name not in _tex_cache:
         try:
             _tex_cache[image.name] = gpu.texture.from_image(image)
@@ -2095,6 +2098,8 @@ class VertexLitEngine(bpy.types.RenderEngine):
 
     def _draw_batches(self, depsgraph, vls, view_proj, studio, ls_mat, sky, ground,
                       bstr, do_shad, s_bias, s_dark, shad_tex, lights, mode):
+        from . import blur
+        blur.begin_frame()
         legacy=_get_main_shader(mode)
         frame_done={}; params_bound={}
         # Progressive compile: sharpen at most ~40ms of new material shaders per frame,
@@ -2203,8 +2208,12 @@ class VertexLitEngine(bpy.types.RenderEngine):
                         except Exception: pass
                     params_bound[id(sh)] = prog
                 if rebind_samplers:
-                    for uni,image in prog['samplers']:
-                        gtex=_get_gpu_tex(image)
+                    textures = blur.resolve_samplers(prog['samplers'])
+                    sh.bind()  # A blur cache rebuild uses its own GPU program.
+                    if prog.get('has_blur'):
+                        try: sh.uniform_sampler('uShadowMap', shad_tex)
+                        except (ValueError, TypeError): pass
+                    for uni, gtex in textures:
                         if gtex is not None:
                             try: sh.uniform_sampler(uni,gtex)
                             except Exception: pass

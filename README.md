@@ -6,7 +6,45 @@ Experimental Blender renderer with live material-node previews, shadows, and scr
 
 ## Status
 
-Published version: **0.19.3 beta**. This branch is **0.19.4 parallax beta**, not a release. Development and primary tests use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum.
+Published version: **0.19.3 beta**. This branch is **0.19.5 blur/parallax beta**, not a release. Development and primary tests use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum.
+
+## General UV Blur node (0.19.5 development beta)
+
+Add **Workbench 2.0 Blur** in the Shader Editor and connect any supported UV-based
+color/value graph through its Color sockets. Use it on color textures, masks,
+procedural Noise/ramps/mixes, or before the Parallax node's Height. Color-to-value
+conversion works through Blender's usual socket connections. Group inputs and
+nested Blur nodes are supported.
+
+- **Radius**: Gaussian support radius in cache pixels (0–64).
+- **Strength**: blend between unfiltered and filtered input (0–1).
+- **Resolution**: cached 0–1 UV tile size (128–2048). Increase for fine detail.
+- **Edges**: Repeat tiles the cache; Extend clamps it.
+
+Zero Radius, zero Strength, and muting bypass the cache exactly. Otherwise the
+upstream graph is evaluated into a linear floating-point GPU texture and filtered
+in two passes. Alpha is filtered premultiplied to avoid dark color fringes.
+
+Upstream values, connections, groups, animation, image pixels/color space/reloads,
+and Blur settings invalidate relevant cached results. Camera movement reuses them;
+mesh UV edits change sampling immediately. Undo/redo and file loading clear runtime
+caches. Caches are not saved into the blend file and do not create image datablocks.
+The retained texture cache is limited to 64 MiB, plus temporary rebuilding buffers.
+Dirty/generated source images receive one CPU content check per draw (shared among
+Blur nodes) because Blender does not expose a reliable pixel revision counter;
+large edited images can therefore still add redraw overhead.
+
+The cache is a **0–1 UV tile**, not an unbounded 3D blur: input graphs must use one
+UV coordinate domain. Nonperiodic graphs become tiled when Repeat is selected.
+Different UV maps mixed upstream, Generated/Object/view-dependent inputs, movies,
+image sequences, and UDIMs are not supported; the node shows a warning and bypasses
+the blur. Other renderers receive a passthrough fallback. Existing limitations of
+our material compiler and named-UV reflection-property support still apply.
+
+Checked with native GPU tests, live viewport edits/undo/redo, F12, parallax heights,
+animation inside groups, procedural inputs, nested caches, alpha edges, cache
+limits, save/reopen, and albedo baking. Tests are small controlled scenes; large
+production scenes and other GPU vendors remain unverified.
 
 ## Parallax development branch (0.19.4 beta)
 

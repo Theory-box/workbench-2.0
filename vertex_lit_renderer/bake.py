@@ -18,7 +18,8 @@ from . import shaders as _sh
 
 def _get_gpu_image_tex(image):
     try:
-        return gpu.texture.from_image(image) if image is not None else None
+        from .engine import _get_gpu_tex
+        return _get_gpu_tex(image)
     except Exception:
         return None
 
@@ -27,6 +28,8 @@ def bake_material_to_array(mat, res=1024):
     """Render mat's node graph across a 0-1 UV plane and return the (res,res,4) float32 array
     (or None on failure). This is computeBaseColor evaluated per texel = the FULL graph
     (Hue/Sat, mixes, ramps, ...), matching what the engine draws on meshes. GPU required."""
+    from . import blur
+    blur.begin_frame()
     _vert_unused, frag_src, tr = material_shader.build_bake_frag(mat)
     shader = gpu.types.GPUShader(_sh.PLANE_BAKE_VERT, frag_src)
     batch = batch_for_shader(shader, 'TRIS', {"pos": [(-1.0, -1.0), (3.0, -1.0), (-1.0, 3.0)]})
@@ -43,8 +46,9 @@ def bake_material_to_array(mat, res=1024):
             for p in tr.params:
                 try: shader.uniform_float(p.uniform, p.value(nt))
                 except Exception: pass
-            for uni, image in [(s.uniform, s.image) for s in tr.samplers]:
-                gtex = _get_gpu_image_tex(image)
+            textures = blur.resolve_samplers([(s.uniform, s.image) for s in tr.samplers])
+            shader.bind()
+            for uni, gtex in textures:
                 if gtex is not None:
                     try: shader.uniform_sampler(uni, gtex)
                     except Exception: pass
