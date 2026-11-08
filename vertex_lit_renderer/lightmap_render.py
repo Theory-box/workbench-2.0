@@ -80,6 +80,14 @@ def prepare(engine, depsgraph, obj, prog, mode, drawable):
             # Lightmaps are linear HDR lighting, not restricted to the live-light cap.
             frag = frag.replace('clamp(light, 0.0, 12.0)', 'light')
             frag = frag.replace('vlr_write_aux(N);', 'vlrSunOutput = vec3(0.0); vlr_write_aux(N);')
+        if prog is not None and 'vlrReliefScreenOffset' in fragment:
+            # Map the hit into the separately packed lightmap UV basis. No extra ray march.
+            # Use original derivatives for filtering, not derivatives of the displaced hit.
+            lookup = ('textureGrad(uLightmap, vLightmapUV + '
+                      'dFdx(vLightmapUV) * vlrReliefScreenOffset.x + '
+                      'dFdy(vLightmapUV) * vlrReliefScreenOffset.y, '
+                      'dFdx(vLightmapUV), dFdy(vLightmapUV))')
+            frag = frag.replace('texture(uLightmap, vLightmapUV)', lookup)
         shader = engine._lightmap_programs[program_key] = gpu.types.GPUShader(vertex, frag)
     engine._lightmap_programs_live.add(program_key)
     from .engine import _get_gpu_tex

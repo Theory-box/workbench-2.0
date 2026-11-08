@@ -128,6 +128,7 @@ uniform mat4 uViewProj;
 vec3 vlrReliefNormal;
 vec3 vlrReliefU, vlrReliefV, vlrReliefN;
 vec2 vlrReliefHit;
+vec2 vlrReliefScreenOffset = vec2(0.0);
 float vlrReliefDepth = 0.0;
 float vlrReliefPixelDepth;
 uniform vec4 uReliefAO; // strength, world radius, world bias, sample budget
@@ -187,6 +188,12 @@ float vlrReliefVisibility(vec3 L) {
 vec2 vlrFinishRelief(vec2 uv, vec2 offset, vec3 px, vec3 py, vec2 ux, vec2 uy, vec3 N, float det, float fade, vec3 V, float layer) {
     vec2 hit = uv + offset;
     vlrReliefHit = hit;
+    // Convert the existing hit offset to screen derivatives, independently of UV scale.
+    float uvDet = ux.x * uy.y - ux.y * uy.x;
+    if (abs(uvDet) > 1e-20) {
+        vlrReliefScreenOffset = vec2(offset.x * uy.y - offset.y * uy.x,
+                                    ux.x * offset.y - ux.y * offset.x) / uvDet;
+    }
     vlrReliefN = N;
     vlrReliefU = (ux.x*cross(py,N) + uy.x*cross(N,px))/det;
     vlrReliefV = (ux.y*cross(py,N) + uy.y*cross(N,px))/det;
@@ -206,6 +213,7 @@ vec2 vlrFinishRelief(vec2 uv, vec2 offset, vec3 px, vec3 py, vec2 ux, vec2 uy, v
 }
 vec2 vlrParallaxOffset(vec2 uv) {
     vlrReliefDepth = 0.0;
+    vlrReliefScreenOffset = vec2(0.0);
     vlrReliefPixelDepth = gl_FragCoord.z;
     vlrReliefNormal = normalize(vNrm);
     float initialHeight = vlrHeight(uv, true);

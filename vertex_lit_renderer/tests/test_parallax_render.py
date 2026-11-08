@@ -60,13 +60,13 @@ def run():
   image.pixels.foreach_set(np.stack([h,h,h,np.ones_like(h)],axis=-1).ravel());image.update()
   tex=t.nodes.new('ShaderNodeTexImage');tex.image=image;t.links.new(scale.outputs[0],tex.inputs['Vector']);t.links.new(tex.outputs['Color'],node.inputs['Height'])
   relief=render('heightmap',m);assert (abs(relief-baseline)[:,:,:3].max(axis=2)>.005).sum()>1000
-  # Separate lightmap UV must remain stationary under parallax.
+  # Separate lightmap UV follows the parallax hit in its own coordinate basis.
   lm=bpy.data.images.new('Lighting',width=16,height=16,float_buffer=True)
   y,x=np.mgrid[:16,:16];light=(x.astype(np.float32)+1)/16
   lm.pixels.foreach_set(np.stack([light,light,light,np.ones_like(light)],axis=-1).ravel());lm.update()
   ob.vlr_lightmap.image=lm;ob.vlr_lightmap.uv_name='UVMap';ob.update_tag(refresh={'DATA'})
   principled=t.nodes.get('Principled BSDF');t.links.remove(principled.inputs['Base Color'].links[0]);principled.inputs['Base Color'].default_value=(1,1,1,1)
-  lit_on=render('lightmap_on',m);node.depth=0;lit_off=render('lightmap_off',m);assert abs(lit_on-lit_off).max()<1e-5
+  lit_on=render('lightmap_on',m);node.depth=0;lit_off=render('lightmap_off',m);assert abs(lit_on-lit_off).max()>.001
   result['toggles_heightmap_lightmap']=True
   ob.vlr_lightmap.image=None
   t.links.new(t.nodes.get('Gradient Texture').outputs['Color'],principled.inputs['Base Color'])
