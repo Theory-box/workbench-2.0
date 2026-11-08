@@ -2250,7 +2250,7 @@ class VertexLitEngine(bpy.types.RenderEngine):
                     try:
                         sh.uniform_float('uReliefAO', (vls.ao_strength if enabled else 0.0,
                             vls.ao_radius if vls else 0.5, vls.ao_bias if vls else 0.02,
-                            float(vls.ao_samples) if vls else 16.0))
+                            16.0 if getattr(self, '_quick_ao', False) else float(vls.ao_samples) if vls else 16.0))
                         sh.uniform_float('uReliefAORidge', vls.ao_ridge if enabled else 0.0)
                     except ValueError: pass
                 if baked is not None:
@@ -2636,6 +2636,9 @@ class VertexLitEngine(bpy.types.RenderEngine):
         finally:
             self._quick_parallax = False
             self._quick_supersampling = False
+            self._quick_shadows = False
+            self._quick_ao = False
+            self._quick_contact = False
 
     def _view_draw(self, context, depsgraph):
         self._ensure_state()
@@ -2683,6 +2686,8 @@ class VertexLitEngine(bpy.types.RenderEngine):
         region=context.region; rv3d=context.region_data
         from . import quick_navigation
         quick_navigation.update(self, context, vls)
+        if self._quick_shadows:
+            s_res = 1024
         center,radius=self._bounds_cache
         if do_shad:
             sdist = getattr(vls, 'shadow_distance', 25.0) if vls else 25.0
@@ -2804,6 +2809,10 @@ class VertexLitEngine(bpy.types.RenderEngine):
                     depsgraph, vls, view_proj, rv3d.view_matrix.to_3x3(), proj,
                     rw, rh, wc, studio, ls_mat, sky, ground, bstr, lights,
                     do_shad=do_shad, s_bias=s_bias, s_soft=s_dark, shad_tex=shad_tex)
+                if getattr(self, '_quick_contact', False):
+                    post_ctx['contact_steps'] = 8
+                if getattr(self, '_quick_ao', False):
+                    post_ctx['ao_samples'] = 16
                 post_ctx['quick_supersampling'] = getattr(self, '_quick_supersampling', False)
                 self._stoch_view = True          # stochastic splats may use the G-buffer depth
                 try:

@@ -26,3 +26,14 @@ independently of parallax Quick Navigation and never modifies the saved value.
 FXAA and other effects remain enabled. F12 stills and animation keep full quality.
 Native Blender 4.4.3 tests verified actual G-buffer dimensions during movement and
 restoration, independent parallax controls, and identical final still/animation output.
+
+## Quick Sun Shadows, AO, and Contact Shadows
+
+Independent Quick checkboxes beside Shadow Res, AO Quality, and Contact Steps use
+1024 shadow-map resolution, Low (16) AO samples, and 8 contact-shadow steps during
+viewport movement/playback. The same ~0.067-second idle delay restores saved values.
+AO's lower budget also applies to parallax height AO. These overrides are viewport
+only; final stills, animation, and other captures use the saved settings.
+Validated native viewport shadow allocation changes, effect sample inputs,
+automatic restoration, playback, saved setting preservation, and matching final
+still/animation outputs in Blender 4.4.3.

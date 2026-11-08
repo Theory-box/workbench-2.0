@@ -89,7 +89,11 @@ class VertexLitSettings(bpy.types.PropertyGroup):
     contact_length: bpy.props.FloatProperty(name="Trace Distance", default=0.2, min=0.001, soft_max=2.0, max=100.0, subtype='DISTANCE')
     contact_thickness: bpy.props.FloatProperty(name="Thickness", default=0.02, min=0.0001, soft_max=0.2, max=10.0, subtype='DISTANCE',
         description="Depth tolerance: lower to reduce false shadows, higher to catch thin geometry")
+    quick_contact: bpy.props.BoolProperty(name="Quick", default=False,
+        description="Use 8 contact-shadow steps during viewport movement; restore after 0.067 seconds idle. Final renders keep selected steps")
     contact_steps: bpy.props.IntProperty(name="Steps", default=24, min=8, max=64)
+    quick_shadows: bpy.props.BoolProperty(name="Quick", default=False,
+        description="Use 1024 sun shadows during viewport movement; restore after 0.067 seconds idle. Final renders keep selected resolution")
     shadow_resolution: bpy.props.EnumProperty(
         name="Shadow Res",
         items=[('1024', '1024', ''), ('2048', '2048', ''), ('4096', '4096', '')],
@@ -233,6 +237,8 @@ class VertexLitSettings(bpy.types.PropertyGroup):
         description="World-space ridge: brighten convex, exposed surfaces (reverse AO)")
     ao_radius: bpy.props.FloatProperty(name="Distance", default=0.5, min=0.01, max=5.0)
     ao_bias: bpy.props.FloatProperty(name="Bias", default=0.02, min=0.0, max=0.5)
+    quick_ao: bpy.props.BoolProperty(name="Quick", default=False,
+        description="Use Low (16) AO samples during viewport movement; restore after 0.067 seconds idle. Final renders keep selected quality")
     ao_samples: bpy.props.EnumProperty(
         name="Quality",
         items=[('16', "Low (16)", "16 samples"),

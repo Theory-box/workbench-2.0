@@ -22,7 +22,10 @@ def update(engine, context, settings):
     playing = getattr(context.screen, 'is_animation_playing', False)
     parallax = bool(settings and settings.use_parallax and settings.quick_navigation)
     supersampling = bool(settings and settings.quick_supersampling and settings.supersampling != '1')
-    enabled = parallax or supersampling
+    shadows = bool(settings and settings.quick_shadows and settings.use_shadows and settings.shadow_resolution != '1024')
+    ao = bool(settings and settings.quick_ao and settings.use_ao and settings.ao_samples != '16')
+    contact = bool(settings and settings.quick_contact and settings.use_contact_shadows and settings.contact_steps > 8)
+    enabled = parallax or supersampling or shadows or ao or contact
     if enabled and ((previous is not None and previous != signature)
                     or getattr(rv, 'is_navigating', False) or playing):
         changed = True
@@ -32,6 +35,9 @@ def update(engine, context, settings):
     active = enabled and now - getattr(engine, '_quick_changed', -1000.0) < IDLE_DELAY
     engine._quick_parallax = active and parallax
     engine._quick_supersampling = active and supersampling
+    engine._quick_shadows = active and shadows
+    engine._quick_ao = active and ao
+    engine._quick_contact = active and contact
     if active and not getattr(engine, '_quick_timer', False):
         engine._quick_timer = True
         area = context.area

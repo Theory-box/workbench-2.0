@@ -86,7 +86,9 @@ class VERTEX_LIT_PT_settings(bpy.types.Panel):
                 shadows.active = s.use_shadows and s.sun_intensity > 0.0
                 col = shadows.column(align=True)
                 col.prop(s, 'shadow_distance')
-                col.prop(s, 'shadow_resolution')
+                row = col.row(align=True)
+                row.prop(s, 'shadow_resolution')
+                row.prop(s, 'quick_shadows')
                 col.prop(s, 'shadow_softness')
                 col.prop(s, 'shadow_bias')
                 if s.use_shadows and s.sun_intensity <= 0.0:
@@ -98,7 +100,9 @@ class VERTEX_LIT_PT_settings(bpy.types.Panel):
                 contact.active = s.use_contact_shadows and s.sun_intensity > 0
                 contact.prop(s, 'contact_length')
                 contact.prop(s, 'contact_thickness')
-                contact.prop(s, 'contact_steps')
+                row = contact.row(align=True)
+                row.prop(s, 'contact_steps')
+                row.prop(s, 'quick_contact')
 
     # ── View Mode / Background ───────────────────────────────────────────────
     def draw_viewmode(self, context, s, root):
@@ -164,7 +168,9 @@ class VERTEX_LIT_PT_settings(bpy.types.Panel):
             col.prop(s, 'ao_ridge', text="Ridge")
             col.prop(s, 'ao_radius', text="Distance")
             col.prop(s, 'ao_bias', text="Bias")
-            col.prop(s, 'ao_samples', text="Quality")
+            row = col.row(align=True)
+            row.prop(s, 'ao_samples', text="Quality")
+            row.prop(s, 'quick_ao')
 
         cs = section(body, "VLR_cavity_screen", "Cavity Screen", default_closed=True,
                      toggle_owner=s, toggle='use_cavity')
