@@ -5,7 +5,7 @@ from vertex_lit_renderer import lightmap
 out=repo.parent/'work/lightmap-tests';result={}
 try:
  bpy.ops.object.select_all(action='SELECT');bpy.ops.object.delete(use_global=False)
- sc=bpy.context.scene;sc.render.engine='VERTEX_LIT';sc.cycles.device='CPU'
+ sc=bpy.context.scene;sc.render.engine='VERTEX_LIT';sc.cycles.device='CPU';sc.vlr_lightmap_settings.lighting_source='WORKBENCH';sc.vlr_lightmap_settings.passes='DIRECT'
  sc.vertex_lit.use_sun=False;sc.vertex_lit.sky_color=(.8,.8,.8);sc.vertex_lit.ground_color=(.8,.8,.8);sc.vertex_lit.hemi_intensity=1
  objs=[]
  for i,passes in enumerate(('DIRECT','INDIRECT','BOTH')):
@@ -26,7 +26,7 @@ try:
  for i,ob in enumerate(objs):
   size=256 if i==1 else 128;assert tuple(ob.vlr_lightmap.image.size)==(size,size)
   a=np.array(ob.vlr_lightmap.image.pixels[:]).reshape(size,size,4);values.append(float(a[size//2,size//2,0]))
- assert values[0]>.7 and values[1]<.001 and abs(values[0]-values[2])<.025,values
+ assert all(v>.7 for v in values) and all(call[2]=='DIRECT' for call in calls),values
  previous=[(ob.data,ob.vlr_lightmap.image) for ob in objs];counter=[0]
  def cancelled(*args):
   counter[0]+=1

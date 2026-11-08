@@ -119,7 +119,8 @@ def _bake_selected_base(context):
             settings = ob.vlr_lightmap_settings
             resolution = int(settings.resolution)
             margin = max(2, min(16, resolution // 128))
-            config = (resolution, settings.samples, settings.lighting_source, settings.passes)
+            global_settings = scene.vlr_lightmap_settings
+            config = (resolution, settings.samples, global_settings.lighting_source, global_settings.passes)
             original = ob.data
             mesh = original.copy()
             selection = [(collection, [element.select for element in collection]) for collection in (mesh.vertices, mesh.edges, mesh.polygons)]
@@ -309,18 +310,19 @@ class VLR_PT_lightmap(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         layout.prop(context.scene.vertex_lit, "lightmap_intensity", slider=True)
+        global_settings = context.scene.vlr_lightmap_settings
+        layout.prop(global_settings, 'lighting_source')
+        layout.prop(global_settings, 'passes')
         ob = context.active_object
         if ob is None or ob.type != 'MESH':
             layout.label(text='Select a mesh to edit bake settings')
             return
         settings = ob.vlr_lightmap_settings
         layout.label(text='Settings: ' + ob.name)
-        layout.prop(settings, 'lighting_source')
-        layout.prop(settings, 'passes')
         layout.prop(settings, 'keep_live_lighting')
-        if settings.keep_live_lighting and settings.passes != 'INDIRECT':
+        if settings.keep_live_lighting and global_settings.passes != 'INDIRECT':
             layout.label(text='Direct bake + live light may double lighting', icon='INFO')
-        if settings.lighting_source == 'WORKBENCH':
+        if global_settings.lighting_source == 'WORKBENCH':
             layout.label(text='Sun + Sky/Ground; emission retained')
             layout.label(text='Key Light excluded')
         layout.prop(settings, 'resolution'); layout.prop(settings, 'samples')
