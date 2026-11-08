@@ -38,7 +38,7 @@ For parallax, add **Workbench 2.0 Parallax** in the Shader Editor. Connect a UV-
 
 ## Compatibility and limitations
 
-**Current release: 0.19.18 beta.** Development and primary testing use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum, but current features have not been validated on 4.2. Other GPU vendors and large production scenes are not comprehensively tested; performance depends on scene complexity and enabled effects.
+**Current release: 0.19.19 beta.** Development and primary testing use **Blender 4.4.3**. The add-on declares Blender 4.2 as its minimum, but current features have not been validated on 4.2. Other GPU vendors and large production scenes are not comprehensively tested; performance depends on scene complexity and enabled effects.
 
 - Shader-node support is incomplete. Materials can look different from Cycles or Eevee; custom nodes do not produce equivalent effects in those engines.
 - Parallax changes apparent surface depth, not mesh geometry or the outer silhouette. UV seams, extreme grazing angles, and complex height graphs have quality/performance limits.
@@ -50,6 +50,14 @@ For parallax, add **Workbench 2.0 Parallax** in the Shader Editor. Connect a UV-
 See the [feature guide](docs/FEATURE_GUIDE.md) for controls, tested behavior, cache restrictions, and further known limitations. Release notes record individual changes.
 
 ## Latest update
+
+**0.19.19 beta** adds a consolidated **Quick Mode** panel with a master eye toggle and independent parallax, supersampling, sun-shadow, AO, and contact-shadow controls. Selected reductions apply only during viewport movement/playback and restore after about 0.067 seconds. Final renders retain full quality.
+
+**Solid** view retains supported bump/parallax detail with a uniform color picker and Surface Detail toggle; **Normal** view displays bump and parallax-derived normals. Lightmaps gain global intensity, scene-wide lighting source/pass controls, and experimental real-time parallax UV displacement. Resolution and samples remain per object. Large parallax offsets can cross packed lightmap UV islands; test seams before relying on this feature.
+
+See [Quick Mode](docs/QUICK_NAVIGATION.md), [surface-detail views](docs/SOLID_SURFACE_DETAIL.md), and [parallax lightmaps](docs/PARALLAX_LIGHTMAP_SHIFT.md).
+
+### Previous update
 
 **0.19.18 beta** adds Quick Navigation and per-object lightmap bake settings, including Direct / Indirect / Both passes. Bake-target modifiers are temporarily disabled and restored. **Keep Live Lighting** defaults on, preserving live Sun and parallax self-shadowing with baked lighting; choose **Indirect** to avoid doubling direct light. The previous blocking bake behavior is retained so the temporary Solid viewport is not exposed during a background job.
 

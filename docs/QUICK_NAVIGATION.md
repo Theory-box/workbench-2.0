@@ -1,7 +1,6 @@
 # Quick Navigation
 
-Enable **Render Properties > Workbench 2.0 > Shading > Quick Navigation**, beside
-Parallax. Off by default. While enabled, viewport navigation, object transform
+All Quick controls are in **Render Properties > Workbench 2.0 > Quick Mode**. The header eye enables/disables the selected controls without changing their individual values. Individual controls are off by default; the master eye defaults on. While enabled, viewport navigation, object transform
 updates, Edit Mode geometry updates, and viewport animation playback temporarily
 set parallax depth to zero for drawing. This also bypasses local height AO,
 parallax sun self-shadowing, and depth intersections. Original node values and the
@@ -19,7 +18,7 @@ output, and two final animation frames identical to the full-quality reference.
 
 ## Quick Supersampling
 
-The separate Quick checkbox beside Supersampling uses 1x during viewport movement,
+The Supersampling checkbox in Quick Mode uses 1x during viewport movement,
 object transforms, Edit Mode geometry updates, and viewport playback. It restores
 the saved supersampling level after the same ~0.067-second idle delay. It works
 independently of parallax Quick Navigation and never modifies the saved value.
@@ -29,7 +28,7 @@ restoration, independent parallax controls, and identical final still/animation 
 
 ## Quick Sun Shadows, AO, and Contact Shadows
 
-Independent Quick checkboxes beside Shadow Res, AO Quality, and Contact Steps use
+Independent Sun Shadows, AO, and Contact Shadows checkboxes in Quick Mode use
 1024 shadow-map resolution, Low (16) AO samples, and 8 contact-shadow steps during
 viewport movement/playback. The same ~0.067-second idle delay restores saved values.
 AO's lower budget also applies to parallax height AO. These overrides are viewport
