@@ -25,7 +25,7 @@ def update(engine, context, settings):
     shadows = bool(settings and settings.quick_shadows and settings.use_shadows and settings.shadow_resolution != '1024')
     ao = bool(settings and settings.quick_ao and settings.use_ao and settings.ao_samples != '16')
     contact = bool(settings and settings.quick_contact and settings.use_contact_shadows and settings.contact_steps > 8)
-    enabled = parallax or supersampling or shadows or ao or contact
+    enabled = bool(settings and settings.quick_enabled and (parallax or supersampling or shadows or ao or contact))
     if enabled and ((previous is not None and previous != signature)
                     or getattr(rv, 'is_navigating', False) or playing):
         changed = True

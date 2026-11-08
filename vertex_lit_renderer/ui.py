@@ -44,6 +44,7 @@ class VERTEX_LIT_PT_settings(bpy.types.Panel):
     def draw(self, context):
         s = context.scene.vertex_lit
         root = indent(self.layout)
+        self.draw_quick(context, s, root)
         self.draw_lighting(context, s, root)
         self.draw_viewmode(context, s, root)
         self.draw_background(context, s, root)
@@ -53,6 +54,20 @@ class VERTEX_LIT_PT_settings(bpy.types.Panel):
         self.draw_splats(context, s, root)
 
     # ── Lighting ─────────────────────────────────────────────────────────────
+    def draw_quick(self, context, s, root):
+        header, body = root.panel("VLR_quick", default_closed=False)
+        header.label(text="Quick Mode")
+        header.prop(s, 'quick_enabled', text="", icon='HIDE_OFF' if s.quick_enabled else 'HIDE_ON', emboss=False)
+        if body is None:
+            return
+        col = indent(body)
+        col.active = s.quick_enabled
+        col.prop(s, 'quick_navigation', text="Parallax: Off")
+        col.prop(s, 'quick_supersampling', text="Supersampling: 1x")
+        col.prop(s, 'quick_shadows', text="Sun Shadows: 1024")
+        col.prop(s, 'quick_ao', text="AO: Low (16)")
+        col.prop(s, 'quick_contact', text="Contact Shadows: 8 Steps")
+
     def draw_lighting(self, context, s, root):
         body = section(root, "VLR_lighting", "Lighting")
         if body is None:
@@ -86,9 +101,7 @@ class VERTEX_LIT_PT_settings(bpy.types.Panel):
                 shadows.active = s.use_shadows and s.sun_intensity > 0.0
                 col = shadows.column(align=True)
                 col.prop(s, 'shadow_distance')
-                row = col.row(align=True)
-                row.prop(s, 'shadow_resolution')
-                row.prop(s, 'quick_shadows')
+                col.prop(s, 'shadow_resolution')
                 col.prop(s, 'shadow_softness')
                 col.prop(s, 'shadow_bias')
                 if s.use_shadows and s.sun_intensity <= 0.0:
@@ -100,9 +113,7 @@ class VERTEX_LIT_PT_settings(bpy.types.Panel):
                 contact.active = s.use_contact_shadows and s.sun_intensity > 0
                 contact.prop(s, 'contact_length')
                 contact.prop(s, 'contact_thickness')
-                row = contact.row(align=True)
-                row.prop(s, 'contact_steps')
-                row.prop(s, 'quick_contact')
+                contact.prop(s, 'contact_steps')
 
     # ── View Mode / Background ───────────────────────────────────────────────
     def draw_viewmode(self, context, s, root):
@@ -146,9 +157,6 @@ class VERTEX_LIT_PT_settings(bpy.types.Panel):
             return
         body.prop(s, 'backface_cull')
         body.prop(s, 'use_parallax')
-        row = body.row()
-        row.active = s.use_parallax
-        row.prop(s, 'quick_navigation')
 
         outline = section(body, "VLR_outline", "Outline", default_closed=True,
                           toggle_owner=s, toggle='use_outline')
@@ -168,9 +176,7 @@ class VERTEX_LIT_PT_settings(bpy.types.Panel):
             col.prop(s, 'ao_ridge', text="Ridge")
             col.prop(s, 'ao_radius', text="Distance")
             col.prop(s, 'ao_bias', text="Bias")
-            row = col.row(align=True)
-            row.prop(s, 'ao_samples', text="Quality")
-            row.prop(s, 'quick_ao')
+            col.prop(s, 'ao_samples', text="Quality")
 
         cs = section(body, "VLR_cavity_screen", "Cavity Screen", default_closed=True,
                      toggle_owner=s, toggle='use_cavity')
@@ -187,9 +193,7 @@ class VERTEX_LIT_PT_settings(bpy.types.Panel):
             return
         col = body.column()
         col.prop(s, 'aa_method')
-        row = col.row(align=True)
-        row.prop(s, 'supersampling')
-        row.prop(s, 'quick_supersampling')
+        col.prop(s, 'supersampling')
 
     def draw_bake(self, context, s, root):
         body = section(root, "VLR_bake", "Bake", default_closed=True)

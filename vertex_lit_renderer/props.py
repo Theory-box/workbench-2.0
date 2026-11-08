@@ -42,6 +42,9 @@ def _view_mode_update(self, context):
 
 
 class VertexLitSettings(bpy.types.PropertyGroup):
+    quick_enabled: bpy.props.BoolProperty(name="Quick Mode", default=True,
+        description="Enable selected viewport quick settings without changing their individual choices")
+
     lightmap_intensity: bpy.props.FloatProperty(name="Lightmap Intensity", default=1.0,
         min=0.0, soft_max=2.0, description="Global multiplier for baked lightmap lighting; updates without rebaking")
 
